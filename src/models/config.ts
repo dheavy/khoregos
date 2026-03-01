@@ -14,6 +14,7 @@ export const ProjectConfigSchema = z.object({
 export const SessionConfigSchema = z.object({
   context_retention_days: z.number().default(90),
   audit_retention_days: z.number().default(365),
+  session_retention_days: z.number().default(365),
   // When true (default), ending a Claude Code session automatically
   // completes the k6s session and removes the daemon state file.
   // Set to false to keep the k6s session alive across multiple

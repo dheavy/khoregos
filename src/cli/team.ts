@@ -20,6 +20,7 @@ import {
 import {
   AuditLogger,
   pruneAuditEvents,
+  pruneSessions,
   setWebhookDispatcher,
 } from "../engine/audit.js";
 import { loadSigningKey } from "../engine/signing.js";
@@ -272,8 +273,6 @@ export function registerTeamCommands(program: Command): void {
             git_dirty: s.gitDirty,
           },
         });
-        logger.stop();
-
         const tracer = getTracer();
         tracer.startActiveSpan(
           "session.start",
@@ -290,15 +289,38 @@ export function registerTeamCommands(program: Command): void {
         );
         recordSessionStart();
 
-        // Auto-prune old audit data (silent, best-effort).
-        const retentionDays = config.session.audit_retention_days;
-        const cutoff = new Date();
-        cutoff.setDate(cutoff.getDate() - retentionDays);
+        // Auto-prune old audit/session data (best-effort).
+        const auditCutoff = new Date();
+        auditCutoff.setDate(
+          auditCutoff.getDate() - config.session.audit_retention_days,
+        );
+        const sessionCutoff = new Date();
+        sessionCutoff.setDate(
+          sessionCutoff.getDate() - config.session.session_retention_days,
+        );
         try {
-          pruneAuditEvents(db, cutoff.toISOString());
+          const auditResult = pruneAuditEvents(db, auditCutoff.toISOString());
+          const sessionResult = pruneSessions(db, sessionCutoff.toISOString());
+          if (
+            auditResult.eventsDeleted > 0
+            || sessionResult.sessionsPruned > 0
+          ) {
+            logger.log({
+              eventType: "system",
+              action: `auto-prune: ${auditResult.eventsDeleted} events, ${sessionResult.sessionsPruned} sessions`,
+              details: {
+                audit_retention_days: config.session.audit_retention_days,
+                session_retention_days: config.session.session_retention_days,
+                events_deleted: auditResult.eventsDeleted,
+                sessions_pruned: sessionResult.sessionsPruned,
+              },
+              severity: "info",
+            });
+          }
         } catch {
           // Non-critical — don't block session start.
         }
+        logger.stop();
 
         return s;
       });

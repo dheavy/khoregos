@@ -36,6 +36,7 @@ project:
   description: Test project
 session:
   audit_retention_days: 90
+  session_retention_days: 45
 boundaries:
   - pattern: "*"
     forbidden_paths: [".env*"]
@@ -46,6 +47,7 @@ boundaries:
       const config = loadConfig(configPath);
       expect(config.project.name).toBe("my-project");
       expect(config.session.audit_retention_days).toBe(90);
+      expect(config.session.session_retention_days).toBe(45);
       expect(config.boundaries).toHaveLength(1);
       expect(config.boundaries![0].pattern).toBe("*");
     });
@@ -83,6 +85,7 @@ boundaries:
       );
       expect(config.project.name).toBe("default-name");
       expect(config.boundaries).toBeDefined();
+      expect(config.session.session_retention_days).toBe(365);
     });
 
     it("returns loaded config when file exists", () => {

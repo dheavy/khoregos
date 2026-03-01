@@ -9,7 +9,7 @@ import chalk from "chalk";
 import Table from "cli-table3";
 import { Db } from "../store/db.js";
 import { StateManager } from "../engine/state.js";
-import { AuditLogger, pruneAuditEvents } from "../engine/audit.js";
+import { AuditLogger, pruneAuditEvents, pruneSessions } from "../engine/audit.js";
 import { loadSigningKey, verifyChain } from "../engine/signing.js";
 import { generateAuditReport, type ReportStandard } from "../engine/report.js";
 import { loadConfigOrDefault } from "../models/config.js";
@@ -330,24 +330,50 @@ export function registerAuditCommands(program: Command): void {
       "--before <date>",
       "Delete events before this ISO date (overrides retention config)",
     )
+    .option(
+      "--sessions-before <date>",
+      "Delete completed sessions with ended_at before this ISO date",
+    )
     .option("--dry-run", "Show what would be deleted without deleting")
-    .action((opts: { before?: string; dryRun?: boolean }) => {
+    .action((opts: { before?: string; sessionsBefore?: string; dryRun?: boolean }) => {
       const projectRoot = process.cwd();
       const configFile = path.join(projectRoot, "k6s.yaml");
+      const config = loadConfigOrDefault(configFile, "project");
 
-      let beforeDate: string;
-      if (opts.before) {
-        beforeDate = new Date(opts.before).toISOString();
+      const shouldPruneEvents = opts.before !== undefined || opts.sessionsBefore === undefined;
+      const shouldPruneSessions = opts.sessionsBefore !== undefined || opts.before === undefined;
+
+      let eventsBeforeDate: string;
+      if (opts.before !== undefined) {
+        eventsBeforeDate = new Date(opts.before).toISOString();
       } else {
-        const config = loadConfigOrDefault(configFile, "project");
         const retentionDays = config.session.audit_retention_days;
         const cutoff = new Date();
         cutoff.setDate(cutoff.getDate() - retentionDays);
-        beforeDate = cutoff.toISOString();
+        eventsBeforeDate = cutoff.toISOString();
+      }
+
+      let sessionsBeforeDate: string;
+      if (opts.sessionsBefore !== undefined) {
+        sessionsBeforeDate = new Date(opts.sessionsBefore).toISOString();
+      } else {
+        const retentionDays = config.session.session_retention_days;
+        const cutoff = new Date();
+        cutoff.setDate(cutoff.getDate() - retentionDays);
+        sessionsBeforeDate = cutoff.toISOString();
       }
 
       const result = withDb(projectRoot, (db) => {
-        return pruneAuditEvents(db, beforeDate, opts.dryRun ?? false);
+        const eventsResult = shouldPruneEvents
+          ? pruneAuditEvents(db, eventsBeforeDate, opts.dryRun ?? false)
+          : { eventsDeleted: 0, sessionsPruned: 0 };
+        const sessionsResult = shouldPruneSessions
+          ? pruneSessions(db, sessionsBeforeDate, opts.dryRun ?? false)
+          : { sessionsPruned: 0 };
+        return {
+          eventsDeleted: eventsResult.eventsDeleted,
+          sessionsPruned: sessionsResult.sessionsPruned,
+        };
       });
 
       if (opts.dryRun) {

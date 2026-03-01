@@ -180,43 +180,48 @@ export function pruneAuditEvents(
       "SELECT COUNT(*) as count FROM audit_events WHERE timestamp < ?",
       [beforeDate],
     );
-    // Sessions that ended before the cutoff with no remaining events.
-    const sessionCount = db.fetchOne(
-      `SELECT COUNT(*) as count FROM sessions
-       WHERE state IN ('completed', 'failed')
-       AND ended_at IS NOT NULL AND ended_at < ?`,
-      [beforeDate],
-    );
     return {
       eventsDeleted: (eventCount?.count as number) ?? 0,
-      sessionsPruned: (sessionCount?.count as number) ?? 0,
+      sessionsPruned: 0,
     };
   }
 
-  // Delete old events.
+  // Delete old events only. Session pruning is handled by pruneSessions.
   const eventResult = db.db
     .prepare("DELETE FROM audit_events WHERE timestamp < ?")
     .run(beforeDate);
 
-  // Find completed/failed sessions that ended before the cutoff.
+  return { eventsDeleted: eventResult.changes, sessionsPruned: 0 };
+}
+
+/**
+ * Prune completed/failed sessions older than the provided cutoff date.
+ * Active or created sessions are never pruned.
+ */
+export function pruneSessions(
+  db: Db,
+  beforeDate: string,
+  dryRun = false,
+): { sessionsPruned: number } {
   const staleSessions = db.fetchAll(
     `SELECT id FROM sessions
      WHERE state IN ('completed', 'failed')
      AND ended_at IS NOT NULL AND ended_at < ?`,
     [beforeDate],
   );
+  if (dryRun) {
+    return { sessionsPruned: staleSessions.length };
+  }
 
-  let sessionsPruned = 0;
-  for (const row of staleSessions) {
-    const sid = row.id as string;
-    // Only prune if no audit events remain for this session.
-    const remaining = db.fetchOne(
-      "SELECT COUNT(*) as count FROM audit_events WHERE session_id = ?",
-      [sid],
-    );
-    if (((remaining?.count as number) ?? 0) === 0) {
-      // Cascade-delete related records.
+  const staleSessionIds = staleSessions.map((row) => row.id as string);
+  if (staleSessionIds.length === 0) {
+    return { sessionsPruned: 0 };
+  }
+
+  db.transaction(() => {
+    for (const sid of staleSessionIds) {
       for (const table of [
+        "audit_events",
         "boundary_violations",
         "file_locks",
         "context_store",
@@ -227,9 +232,8 @@ export function pruneAuditEvents(
         db.delete(table, "session_id = ?", [sid]);
       }
       db.delete("sessions", "id = ?", [sid]);
-      sessionsPruned++;
     }
-  }
+  });
 
-  return { eventsDeleted: eventResult.changes, sessionsPruned };
+  return { sessionsPruned: staleSessionIds.length };
 }
