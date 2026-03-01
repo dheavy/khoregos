@@ -8,8 +8,100 @@ import type { AuditEvent } from "../models/audit.js";
 import type { BoundaryConfig } from "../models/config.js";
 import type { BoundaryViolation } from "../models/context.js";
 
+export type ReportStandard = "generic" | "soc2" | "iso27001";
+
 const EVENT_TYPE_DISPLAY: Record<string, string> = {
   gate_triggered: "sensitive_needs_review",
+};
+
+const SOC2_MAPPINGS: Record<string, { control: string; description: string }> = {
+  session_start: {
+    control: "CC6.1",
+    description: "Logical and physical access controls — session initiation with operator attribution.",
+  },
+  session_complete: {
+    control: "CC6.1",
+    description: "Logical and physical access controls — session completion and cleanup.",
+  },
+  tool_use: {
+    control: "CC8.1",
+    description: "Change management — tool invocations are recorded with agent attribution.",
+  },
+  boundary_violation: {
+    control: "CC6.3",
+    description: "Access controls — unauthorized access attempts are detected and logged.",
+  },
+  gate_triggered: {
+    control: "CC8.1",
+    description: "Change management — sensitive file modifications are flagged for review.",
+  },
+  dependency_added: {
+    control: "CC7.1",
+    description: "System operations — supply chain changes are tracked.",
+  },
+  dependency_removed: {
+    control: "CC7.1",
+    description: "System operations — supply chain changes are tracked.",
+  },
+  dependency_updated: {
+    control: "CC7.1",
+    description: "System operations — supply chain changes are tracked.",
+  },
+  agent_spawn: {
+    control: "CC6.2",
+    description: "Access controls — new agent identity is registered.",
+  },
+  agent_complete: {
+    control: "CC6.2",
+    description: "Access controls — agent lifecycle completion is recorded.",
+  },
+  lock_acquired: {
+    control: "CC6.1",
+    description: "Logical access — resource locking coordinates concurrent agents.",
+  },
+};
+
+const ISO27001_MAPPINGS: Record<string, { control: string; description: string }> = {
+  session_start: {
+    control: "A.12.4.1",
+    description: "Event logging — session initiation with operator context.",
+  },
+  session_complete: {
+    control: "A.12.4.1",
+    description: "Event logging — session termination is recorded.",
+  },
+  tool_use: {
+    control: "A.12.4.1",
+    description: "Event logging — tool operations are recorded.",
+  },
+  boundary_violation: {
+    control: "A.9.4.1",
+    description: "Information access restriction — boundary violations are detected.",
+  },
+  gate_triggered: {
+    control: "A.14.2.2",
+    description: "System change control procedures — sensitive changes are flagged.",
+  },
+  dependency_added: {
+    control: "A.14.2.7",
+    description: "Outsourced development — supply chain changes are tracked.",
+  },
+  dependency_removed: {
+    control: "A.14.2.7",
+    description: "Outsourced development — supply chain changes are tracked.",
+  },
+  dependency_updated: {
+    control: "A.14.2.7",
+    description: "Outsourced development — supply chain changes are tracked.",
+  },
+  agent_spawn: {
+    control: "A.9.2.1",
+    description: "User registration — agent identity is established.",
+  },
+  lock_acquired: {
+    control: "A.9.4.1",
+    description: "Information access restriction — resource locks are recorded.",
+  },
 };
 
 function displayEventType(eventType: string): string {
@@ -93,16 +185,91 @@ function stringifyValue(value: unknown): string {
   return "—";
 }
 
+function reportTitle(standard: ReportStandard): string {
+  if (standard === "soc2") return "# Khoregos audit report — SOC 2";
+  if (standard === "iso27001") return "# Khoregos audit report — ISO 27001";
+  return "# Khoregos audit report";
+}
+
+function appendComplianceMappingSection(
+  report: string[],
+  events: AuditEvent[],
+  standard: ReportStandard,
+): void {
+  if (standard === "generic") return;
+
+  const mapping = standard === "soc2" ? SOC2_MAPPINGS : ISO27001_MAPPINGS;
+  const sectionTitle = standard === "soc2"
+    ? "## SOC 2 compliance mapping"
+    : "## ISO 27001 compliance mapping";
+  const intro = standard === "soc2"
+    ? "This section maps observed audit events to SOC 2 Trust Services Criteria."
+    : "This section maps observed audit events to ISO 27001 Annex A controls.";
+  const controlHeader = standard === "soc2" ? "Criteria" : "Control";
+
+  const summary = new Map<string, { description: string; count: number; evidence: Set<string> }>();
+  const unmapped = new Set<string>();
+
+  for (const event of events) {
+    const mapped = mapping[event.eventType];
+    if (!mapped) {
+      unmapped.add(displayEventType(event.eventType));
+      continue;
+    }
+
+    const current = summary.get(mapped.control) ?? {
+      description: mapped.description,
+      count: 0,
+      evidence: new Set<string>(),
+    };
+    current.count += 1;
+    current.evidence.add(displayEventType(event.eventType));
+    summary.set(mapped.control, current);
+  }
+
+  report.push(sectionTitle);
+  report.push("");
+  report.push(intro);
+  report.push("");
+
+  if (summary.size === 0) {
+    report.push("No mapped events observed for this standard.");
+  } else {
+    const rows = [...summary.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([control, details]) => [
+        control,
+        details.description,
+        String(details.count),
+        [...details.evidence].sort((a, b) => a.localeCompare(b)).join(", "),
+      ]);
+    report.push(
+      ...renderTable(
+        [controlHeader, "Description", "Events", "Evidence"],
+        rows,
+      ),
+    );
+  }
+  report.push("");
+  if (unmapped.size === 0) {
+    report.push("Unmapped event types observed: none.");
+  } else {
+    report.push(`Unmapped event types observed: ${[...unmapped].sort((a, b) => a.localeCompare(b)).join(", ")}.`);
+  }
+  report.push("");
+}
+
 export function generateAuditReport(
   db: Db,
   sessionId: string,
   projectRoot: string,
+  standard: ReportStandard = "generic",
 ): string {
   const sm = new StateManager(db, projectRoot);
   const session = sm.getSession(sessionId);
   if (!session) {
     return [
-      "# Khoregos audit report",
+      reportTitle(standard),
       "",
       "No session found.",
     ].join("\n");
@@ -115,7 +282,7 @@ export function generateAuditReport(
   const events = [...eventsDesc].reverse();
 
   const report: string[] = [];
-  report.push("# Khoregos audit report");
+  report.push(reportTitle(standard));
   report.push("");
   report.push("## Session summary");
   report.push("");
@@ -139,6 +306,8 @@ export function generateAuditReport(
     ),
   );
   report.push("");
+
+  appendComplianceMappingSection(report, events, standard);
 
   report.push("## Agents");
   report.push("");

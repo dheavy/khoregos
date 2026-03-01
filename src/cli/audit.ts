@@ -11,7 +11,7 @@ import { Db } from "../store/db.js";
 import { StateManager } from "../engine/state.js";
 import { AuditLogger, pruneAuditEvents } from "../engine/audit.js";
 import { loadSigningKey, verifyChain } from "../engine/signing.js";
-import { generateAuditReport } from "../engine/report.js";
+import { generateAuditReport, type ReportStandard } from "../engine/report.js";
 import { loadConfigOrDefault } from "../models/config.js";
 import type {
   AuditEvent,
@@ -77,6 +77,13 @@ function printEvent(event: AuditEvent): void {
   console.log(
     `${chalk.dim(time)} ${chalk.cyan(agent.padStart(10))} ${colorFn(displayType.padEnd(15))} ${event.action}`,
   );
+}
+
+function parseReportStandard(value: string): ReportStandard {
+  if (value === "generic" || value === "soc2" || value === "iso27001") {
+    return value;
+  }
+  throw new Error("standard must be one of: generic, soc2, iso27001");
 }
 
 export function registerAuditCommands(program: Command): void {
@@ -448,19 +455,32 @@ export function registerAuditCommands(program: Command): void {
     .command("report")
     .description("Generate a structured audit report for a session")
     .option("-s, --session <id>", "Session ID or 'latest'", "latest")
+    .option(
+      "--standard <name>",
+      "Report standard: generic, soc2, iso27001",
+      "generic",
+    )
     .option("-o, --output <file>", "Write report to file (stdout if omitted)")
-    .action((opts: { session: string; output?: string }) => {
+    .action((opts: { session: string; standard: string; output?: string }) => {
       const projectRoot = process.cwd();
       if (!existsSync(path.join(projectRoot, ".khoregos", "k6s.db"))) {
         console.log(chalk.yellow("No audit data found."));
         return;
       }
 
+      let standard: ReportStandard;
+      try {
+        standard = parseReportStandard(opts.standard);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "invalid report standard";
+        console.error(chalk.red(`Error: ${message}.`));
+        process.exit(1);
+      }
       const report = withDb(projectRoot, (db) => {
         const sm = new StateManager(db, projectRoot);
         const sessionId = resolveSessionId(sm, opts.session);
         if (!sessionId) return null;
-        return generateAuditReport(db, sessionId, projectRoot);
+        return generateAuditReport(db, sessionId, projectRoot, standard);
       });
 
       if (!report) {
