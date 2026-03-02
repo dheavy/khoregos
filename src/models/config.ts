@@ -72,6 +72,15 @@ export const OpenTelemetryConfigSchema = z.object({
   endpoint: z.string().default("http://localhost:4317"),
 });
 
+export const TimestampingConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  authority_url: z.string().default("https://freetsa.org/tsr"),
+  interval_events: z.number().default(0),
+  strict_verify: z.boolean().default(false),
+  ca_cert_file: z.string().optional(),
+  tsa_cert_file: z.string().optional(),
+});
+
 export const WebhookConfigSchema = z.object({
   url: z.string(),
   events: z.array(z.string()).default([]),
@@ -83,6 +92,7 @@ export const WebhookConfigSchema = z.object({
 export const ObservabilityConfigSchema = z.object({
   prometheus: PrometheusConfigSchema.default({}),
   opentelemetry: OpenTelemetryConfigSchema.default({}),
+  timestamping: TimestampingConfigSchema.optional(),
   webhooks: z.array(WebhookConfigSchema).default([]),
 });
 

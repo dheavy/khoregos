@@ -13,6 +13,10 @@ import { AuditLogger, pruneAuditEvents, pruneSessions } from "../engine/audit.js
 import { loadSigningKey, verifyChain } from "../engine/signing.js";
 import { generateAuditReport, type ReportStandard } from "../engine/report.js";
 import { displayEventType } from "../engine/event-types.js";
+import {
+  createAndStoreTimestampAnchorFromHmac,
+  type TimestampAnchor,
+} from "../engine/timestamp.js";
 import { loadConfigOrDefault } from "../models/config.js";
 import type {
   AuditEvent,
@@ -80,6 +84,117 @@ function parseReportStandard(value: string): ReportStandard {
 
 export function registerAuditCommands(program: Command): void {
   const audit = program.command("audit").description("View audit trail");
+
+  audit
+    .command("timestamp")
+    .description("Create an external timestamp anchor for a session")
+    .option("-s, --session <id>", "Session ID or 'latest'", "latest")
+    .action(async (opts: { session: string }) => {
+      try {
+        const projectRoot = process.cwd();
+        const khoregoDir = path.join(projectRoot, ".khoregos");
+        if (!existsSync(path.join(khoregoDir, "k6s.db"))) {
+          console.log(chalk.yellow("No audit data found."));
+          return;
+        }
+
+        const config = loadConfigOrDefault(path.join(projectRoot, "k6s.yaml"), "project");
+        const timestampingConfig = config.observability?.timestamping;
+        const tsaUrl = timestampingConfig?.authority_url ?? "https://freetsa.org/tsr";
+        const strictVerify = timestampingConfig?.strict_verify === true;
+
+        const db = new Db(path.join(projectRoot, ".khoregos", "k6s.db"));
+        db.connect();
+        let anchor: TimestampAnchor | null = null;
+        try {
+          const sm = new StateManager(db, projectRoot);
+          const sessionId = resolveSessionId(sm, opts.session);
+          if (!sessionId) {
+            console.log(chalk.yellow("No session found."));
+            return;
+          }
+
+          const latest = db.fetchOne(
+            "SELECT sequence, hmac FROM audit_events WHERE session_id = ? ORDER BY sequence DESC LIMIT 1",
+            [sessionId],
+          );
+          const sequence = Number(latest?.sequence ?? 0);
+          const hmac = typeof latest?.hmac === "string" ? latest.hmac : null;
+          if (!hmac || sequence <= 0) {
+            console.log(chalk.yellow("No signed audit events available for timestamping."));
+            return;
+          }
+
+          const caCertFile = timestampingConfig?.ca_cert_file
+            ? (
+              path.isAbsolute(timestampingConfig.ca_cert_file)
+                ? timestampingConfig.ca_cert_file
+                : path.join(projectRoot, timestampingConfig.ca_cert_file)
+            )
+            : undefined;
+          const tsaCertFile = timestampingConfig?.tsa_cert_file
+            ? (
+              path.isAbsolute(timestampingConfig.tsa_cert_file)
+                ? timestampingConfig.tsa_cert_file
+                : path.join(projectRoot, timestampingConfig.tsa_cert_file)
+            )
+            : undefined;
+
+          anchor = await createAndStoreTimestampAnchorFromHmac({
+            db,
+            sessionId,
+            eventSequence: sequence,
+            eventHmac: hmac,
+            timestamping: {
+              authorityUrl: tsaUrl,
+              strictVerify,
+              caCertFile,
+              tsaCertFile,
+            },
+            projectRoot,
+          });
+
+          const key = loadSigningKey(khoregoDir);
+          const session = sm.getSession(sessionId);
+          const logger = new AuditLogger(db, sessionId, session?.traceId, key);
+          logger.start();
+          let host = tsaUrl;
+          try {
+            host = new URL(tsaUrl).host;
+          } catch {
+            host = tsaUrl;
+          }
+          logger.log({
+            eventType: "system",
+            action: `timestamp anchor: seq ${sequence}, tsa=${host}`,
+            details: {
+              anchor_id: anchor.id,
+              chain_hash: anchor.chainHash,
+              event_sequence: sequence,
+              tsa_url: tsaUrl,
+              verified: anchor.verified,
+              strict_verified: strictVerify,
+            },
+            severity: "info",
+          });
+          logger.stop();
+        } finally {
+          db.close();
+        }
+
+        if (!anchor) {
+          return;
+        }
+        console.log(
+          chalk.green("✓")
+          + ` Timestamp anchor created at seq ${anchor.eventSequence} (${anchor.verified ? "verified" : "unverified"})`,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "timestamp anchor failed";
+        console.error(chalk.red(`Error: ${message}.`));
+        process.exit(1);
+      }
+    });
 
   audit
     .command("show")

@@ -17,6 +17,7 @@ import { generateSigningKey, loadSigningKey } from "../../src/engine/signing.js"
 import { mkdtempSync, rmSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
+import { spawn } from "node:child_process";
 import { sessionToDbRow } from "../../src/models/session.js";
 import type { Session } from "../../src/models/session.js";
 import { WebhookDispatcher } from "../../src/engine/webhooks.js";
@@ -138,6 +139,138 @@ describe("AuditLogger", () => {
         action: "resume test",
       });
       expect(event.sequence).toBe(countBefore + 1);
+    });
+
+    it("creates periodic timestamp anchors when interval_events is reached", async () => {
+      const sid = "01ARZ3NDEKTSV4RRFFQ69G5FB0";
+      const serverScript = [
+        "const http=require('node:http');",
+        "const port=18789;",
+        "const server=http.createServer((req,res)=>{",
+        "if(req.method!=='POST'){res.writeHead(404);res.end();return;}",
+        "const chunks=[];",
+        "req.on('data',c=>chunks.push(Buffer.from(c)));",
+        "req.on('end',()=>{const body=Buffer.concat(chunks);res.writeHead(200,{'Content-Type':'application/timestamp-reply'});res.end(body);});",
+        "});",
+        "server.listen(port,'127.0.0.1',()=>console.log('ready'));",
+      ].join("");
+      const server = spawn(process.execPath, ["-e", serverScript], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      await new Promise<void>((resolve, reject) => {
+        const onData = (chunk: Buffer) => {
+          if (chunk.toString("utf-8").includes("ready")) {
+            server.stdout.off("data", onData);
+            resolve();
+          }
+        };
+        server.stdout.on("data", onData);
+        server.once("error", reject);
+        server.once("exit", (code) => {
+          if (code !== null && code !== 0) {
+            reject(new Error(`mock tsa exited early with code ${code}`));
+          }
+        });
+      });
+      const configSnapshot = JSON.stringify({
+        project: { name: "test" },
+        observability: {
+          timestamping: {
+            enabled: true,
+            authority_url: "http://127.0.0.1:18789/tsr",
+            interval_events: 2,
+            strict_verify: false,
+          },
+        },
+      });
+      db.insert("sessions", sessionToDbRow({
+        id: sid,
+        objective: "auto timestamp",
+        state: "active",
+        startedAt: new Date().toISOString(),
+        endedAt: null,
+        parentSessionId: null,
+        configSnapshot,
+        contextSummary: null,
+        metadata: null,
+        operator: null,
+        hostname: null,
+        k6sVersion: null,
+        claudeCodeVersion: null,
+        gitBranch: null,
+        gitSha: null,
+        gitDirty: false,
+        traceId: null,
+      }));
+
+      try {
+        const logger = new AuditLogger(db, sid, null, signingKey!);
+        logger.start();
+        logger.log({ eventType: "session_start", action: "start" });
+        logger.log({ eventType: "tool_use", action: "run" });
+
+        let anchored = false;
+        for (let i = 0; i < 20; i += 1) {
+          const row = db.fetchOne(
+            "SELECT event_sequence FROM timestamps WHERE session_id = ? ORDER BY event_sequence DESC LIMIT 1",
+            [sid],
+          ) as { event_sequence?: number } | undefined;
+          if ((row?.event_sequence ?? 0) === 2) {
+            anchored = true;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        expect(anchored).toBe(true);
+      } finally {
+        server.kill();
+      }
+    });
+
+    it("does not auto-anchor before interval_events threshold", async () => {
+      const sid = "01ARZ3NDEKTSV4RRFFQ69G5FB1";
+      const configSnapshot = JSON.stringify({
+        project: { name: "test" },
+        observability: {
+          timestamping: {
+            enabled: true,
+            authority_url: "http://127.0.0.1:9/tsr",
+            interval_events: 3,
+            strict_verify: false,
+          },
+        },
+      });
+      db.insert("sessions", sessionToDbRow({
+        id: sid,
+        objective: "auto timestamp threshold",
+        state: "active",
+        startedAt: new Date().toISOString(),
+        endedAt: null,
+        parentSessionId: null,
+        configSnapshot,
+        contextSummary: null,
+        metadata: null,
+        operator: null,
+        hostname: null,
+        k6sVersion: null,
+        claudeCodeVersion: null,
+        gitBranch: null,
+        gitSha: null,
+        gitDirty: false,
+        traceId: null,
+      }));
+
+      const logger = new AuditLogger(db, sid, null, signingKey!);
+      logger.start();
+      logger.log({ eventType: "session_start", action: "start" });
+      logger.log({ eventType: "tool_use", action: "run" });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const row = db.fetchOne(
+        "SELECT COUNT(*) as count FROM timestamps WHERE session_id = ?",
+        [sid],
+      ) as { count: number };
+      expect(row.count).toBe(0);
     });
 
     it("dispatches webhook side effects after persisting an audit event", () => {
