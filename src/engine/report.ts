@@ -5,7 +5,7 @@ import { AuditLogger } from "./audit.js";
 import { BoundaryEnforcer } from "./boundaries.js";
 import { loadSigningKey, verifyChain } from "./signing.js";
 import type { AuditEvent } from "../models/audit.js";
-import type { BoundaryConfig } from "../models/config.js";
+import type { BoundaryConfig, ClassificationLevel } from "../models/config.js";
 import type { BoundaryViolation } from "../models/context.js";
 
 export type ReportStandard = "generic" | "soc2" | "iso27001";
@@ -185,6 +185,13 @@ function stringifyValue(value: unknown): string {
   return "—";
 }
 
+function isClassificationLevel(value: unknown): value is ClassificationLevel {
+  return value === "public"
+    || value === "internal"
+    || value === "confidential"
+    || value === "restricted";
+}
+
 function reportTitle(standard: ReportStandard): string {
   if (standard === "soc2") return "# Khoregos audit report — SOC 2";
   if (standard === "iso27001") return "# Khoregos audit report — ISO 27001";
@@ -257,6 +264,80 @@ function appendComplianceMappingSection(
     report.push(`Unmapped event types observed: ${[...unmapped].sort((a, b) => a.localeCompare(b)).join(", ")}.`);
   }
   report.push("");
+}
+
+function appendDataClassificationSummary(
+  report: string[],
+  events: AuditEvent[],
+  classificationsConfigured: boolean,
+): void {
+  if (!classificationsConfigured) return;
+
+  const counts = new Map<ClassificationLevel, number>([
+    ["public", 0],
+    ["internal", 0],
+    ["confidential", 0],
+    ["restricted", 0],
+  ]);
+  const filesByLevel = new Map<ClassificationLevel, Set<string>>([
+    ["public", new Set<string>()],
+    ["internal", new Set<string>()],
+    ["confidential", new Set<string>()],
+    ["restricted", new Set<string>()],
+  ]);
+
+  let anyClassifiedFileEvents = false;
+  for (const event of events) {
+    const affected = parseStringArray(event.filesAffected);
+    if (affected.length === 0) continue;
+    anyClassifiedFileEvents = true;
+    const details = parseJsonObject(event.details);
+    const classification = isClassificationLevel(details?.classification)
+      ? details.classification
+      : "public";
+    counts.set(classification, (counts.get(classification) ?? 0) + 1);
+    const files = filesByLevel.get(classification);
+    if (files) {
+      for (const filePath of affected) {
+        files.add(filePath);
+      }
+    }
+  }
+
+  report.push("## Data classification summary");
+  report.push("");
+  if (!anyClassifiedFileEvents) {
+    report.push("No file-affecting events were recorded.");
+    report.push("");
+    return;
+  }
+
+  const levelOrder: ClassificationLevel[] = [
+    "restricted",
+    "confidential",
+    "internal",
+    "public",
+  ];
+  const rows = levelOrder.map((level) => [
+    level,
+    String(counts.get(level) ?? 0),
+    String(filesByLevel.get(level)?.size ?? 0),
+  ]);
+  report.push(...renderTable(["Classification", "Events", "Unique files"], rows));
+  report.push("");
+
+  for (const level of levelOrder) {
+    const files = [...(filesByLevel.get(level) ?? new Set<string>())].sort((a, b) => a.localeCompare(b));
+    report.push(`### ${level}`);
+    if (files.length === 0) {
+      report.push("No files touched.");
+    } else {
+      for (const filePath of files) {
+        report.push(`- ${filePath}`);
+      }
+    }
+    report.push("");
+  }
 }
 
 export function generateAuditReport(
@@ -383,6 +464,11 @@ export function generateAuditReport(
   }
   report.push("");
 
+  const snapshot = parseJsonObject(session.configSnapshot);
+  const configuredClassifications = Array.isArray(snapshot?.classifications)
+    && snapshot.classifications.length > 0;
+  appendDataClassificationSummary(report, events, configuredClassifications);
+
   report.push("## Sensitive file annotations");
   report.push("");
   const gateEvents = events.filter((event) => event.eventType === "gate_triggered");
@@ -403,7 +489,6 @@ export function generateAuditReport(
   report.push("## Boundary violations");
   report.push("");
   let violations: BoundaryViolation[] | null = null;
-  const snapshot = parseJsonObject(session.configSnapshot);
   const maybeBoundaries = snapshot?.boundaries;
   if (Array.isArray(maybeBoundaries)) {
     const boundaryEnforcer = new BoundaryEnforcer(

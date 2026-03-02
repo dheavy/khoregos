@@ -48,6 +48,20 @@ export const GateConfigSchema = z.object({
   notify: z.array(z.string()).default(["terminal"]),
 });
 
+export const ClassificationLevel = z.enum([
+  "public",
+  "internal",
+  "confidential",
+  "restricted",
+]);
+export type ClassificationLevel = z.infer<typeof ClassificationLevel>;
+
+export const ClassificationConfigSchema = z.object({
+  level: ClassificationLevel,
+  paths: z.array(z.string()),
+});
+export type ClassificationConfig = z.infer<typeof ClassificationConfigSchema>;
+
 export const PrometheusConfigSchema = z.object({
   enabled: z.boolean().default(false),
   port: z.number().default(9090),
@@ -82,6 +96,7 @@ export const K6sConfigSchema = z.object({
   version: z.string().default("1"),
   project: ProjectConfigSchema,
   session: SessionConfigSchema.default({}),
+  classifications: z.array(ClassificationConfigSchema).default([]),
   boundaries: z.array(BoundaryConfigSchema).default([]),
   gates: z.array(GateConfigSchema).default([]),
   observability: ObservabilityConfigSchema.default({}),
