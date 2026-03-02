@@ -12,6 +12,7 @@ import { StateManager } from "../engine/state.js";
 import { AuditLogger, pruneAuditEvents, pruneSessions } from "../engine/audit.js";
 import { loadSigningKey, verifyChain } from "../engine/signing.js";
 import { generateAuditReport, type ReportStandard } from "../engine/report.js";
+import { displayEventType } from "../engine/event-types.js";
 import { loadConfigOrDefault } from "../models/config.js";
 import type {
   AuditEvent,
@@ -40,15 +41,6 @@ function parseDuration(duration: string): string {
       throw new Error(`Unknown duration unit: ${unit}`);
   }
   return new Date(now - ms).toISOString();
-}
-
-/** Map internal event types to user-facing display names. */
-const EVENT_TYPE_DISPLAY: Record<string, string> = {
-  gate_triggered: "sensitive_needs_review",
-};
-
-function displayEventType(eventType: string): string {
-  return EVENT_TYPE_DISPLAY[eventType] ?? eventType;
 }
 
 /** Format a millisecond delta as a human-readable short string. */

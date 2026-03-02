@@ -3,16 +3,13 @@ import type { Db } from "../store/db.js";
 import { StateManager } from "./state.js";
 import { AuditLogger } from "./audit.js";
 import { BoundaryEnforcer } from "./boundaries.js";
+import { displayEventType } from "./event-types.js";
 import { loadSigningKey, verifyChain } from "./signing.js";
 import type { AuditEvent } from "../models/audit.js";
 import type { BoundaryConfig, ClassificationLevel } from "../models/config.js";
 import type { BoundaryViolation } from "../models/context.js";
 
 export type ReportStandard = "generic" | "soc2" | "iso27001";
-
-const EVENT_TYPE_DISPLAY: Record<string, string> = {
-  gate_triggered: "sensitive_needs_review",
-};
 
 const SOC2_MAPPINGS: Record<string, { control: string; description: string }> = {
   session_start: {
@@ -103,10 +100,6 @@ const ISO27001_MAPPINGS: Record<string, { control: string; description: string }
     description: "Information access restriction — resource locks are recorded.",
   },
 };
-
-function displayEventType(eventType: string): string {
-  return EVENT_TYPE_DISPLAY[eventType] ?? eventType;
-}
 
 function fallback(value: string | null): string {
   return value ?? "—";
