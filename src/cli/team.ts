@@ -39,11 +39,12 @@ import {
   recordSessionStart,
 } from "../engine/telemetry.js";
 import { loadConfig, sanitizeConfigForStorage } from "../models/config.js";
-import { type Session, type SessionState } from "../models/session.js";
+import { type Session, type SessionState, sessionDurationSeconds } from "../models/session.js";
 import { Db } from "../store/db.js";
 import { StateManager } from "../engine/state.js";
 import { WebhookDispatcher } from "../engine/webhooks.js";
 import { VERSION } from "../version.js";
+import { output, resolveJsonOption } from "./output.js";
 
 const SESSION_START_ACTION_OBJECTIVE_MAX_LENGTH = 200;
 
@@ -101,6 +102,43 @@ function withDb<T>(projectRoot: string, fn: (db: Db) => T): T {
     return fn(db);
   } finally {
     db.close();
+  }
+}
+
+function hasRegisteredHooks(hooks: unknown): boolean {
+  if (!hooks) return false;
+  if (Array.isArray(hooks)) {
+    return hooks.length > 0;
+  }
+  if (typeof hooks !== "object") return false;
+  const hookGroups = Object.values(hooks as Record<string, unknown>);
+  if (hookGroups.length === 0) return false;
+  return hookGroups.some((group) => {
+    if (!Array.isArray(group) || group.length === 0) return false;
+    return group.some((entry) => {
+      const nested = (entry as Record<string, unknown>).hooks;
+      return Array.isArray(nested) && nested.length > 0;
+    });
+  });
+}
+
+function readRegistrationStatus(projectRoot: string): { mcpRegistered: boolean; hooksRegistered: boolean } {
+  if (isPluginInstalled(projectRoot)) {
+    return { mcpRegistered: true, hooksRegistered: true };
+  }
+  const settingsFile = path.join(projectRoot, ".claude", "settings.json");
+  if (!existsSync(settingsFile)) {
+    return { mcpRegistered: false, hooksRegistered: false };
+  }
+  try {
+    const settings = JSON.parse(readFileSync(settingsFile, "utf-8")) as Record<string, unknown>;
+    const mcpServers = settings.mcpServers as Record<string, unknown> | undefined;
+    return {
+      mcpRegistered: Boolean(mcpServers?.khoregos),
+      hooksRegistered: hasRegisteredHooks(settings.hooks),
+    };
+  } catch {
+    return { mcpRegistered: false, hooksRegistered: false };
   }
 }
 
@@ -631,12 +669,28 @@ export function registerTeamCommands(program: Command): void {
   team
     .command("status")
     .description("Show current team session status")
-    .action(() => {
+    .option("--json", "Output in JSON format")
+    .action((opts: { json?: boolean }, command: Command) => {
+      const json = resolveJsonOption(opts, command);
       const projectRoot = process.cwd();
       const khoregoDir = path.join(projectRoot, ".khoregos");
 
       const daemon = new DaemonState(khoregoDir);
-      if (!daemon.isRunning()) {
+      const daemonRunning = daemon.isRunning();
+      const registration = readRegistrationStatus(projectRoot);
+      if (!daemonRunning) {
+        if (json) {
+          output(
+            {
+              active_session: null,
+              daemon_running: false,
+              mcp_registered: registration.mcpRegistered,
+              hooks_registered: registration.hooksRegistered,
+            },
+            { json: true },
+          );
+          return;
+        }
         console.log(chalk.dim("No active session"));
         return;
       }
@@ -648,6 +702,37 @@ export function registerTeamCommands(program: Command): void {
         const sm = new StateManager(db, projectRoot);
         const session = sm.getSession(sessionId);
         const agents = session ? sm.listAgents(sessionId) : [];
+
+        if (json) {
+          output(
+            {
+              active_session: session
+                ? {
+                    session_id: session.id,
+                    objective: session.objective,
+                    state: session.state,
+                    started_at: session.startedAt,
+                    operator: session.operator,
+                    git_branch: session.gitBranch,
+                    trace_id: session.traceId,
+                  }
+                : {
+                    session_id: sessionId,
+                    objective: null,
+                    state: "active",
+                    started_at: null,
+                    operator: null,
+                    git_branch: null,
+                    trace_id: null,
+                  },
+              daemon_running: true,
+              mcp_registered: registration.mcpRegistered,
+              hooks_registered: registration.hooksRegistered,
+            },
+            { json: true },
+          );
+          return;
+        }
 
         if (session) {
           console.log(`${chalk.bold("Session:")} ${session.id.slice(0, 8)}...`);
@@ -671,23 +756,58 @@ export function registerTeamCommands(program: Command): void {
     .command("history")
     .description("List past sessions")
     .option("-n, --limit <number>", "Number of sessions to show", "10")
-    .action((opts: { limit: string }) => {
+    .option("--json", "Output in JSON format")
+    .action((opts: { limit: string; json?: boolean }, command: Command) => {
+      const json = resolveJsonOption(opts, command);
       const projectRoot = process.cwd();
       const khoregoDir = path.join(projectRoot, ".khoregos");
       const dbPath = path.join(khoregoDir, "k6s.db");
 
       if (!existsSync(dbPath)) {
+        if (json) {
+          output({ sessions: [] }, { json: true });
+          return;
+        }
         console.log(chalk.yellow("No sessions found."));
         return;
       }
 
       const sessions = withDb(projectRoot, (db) => {
         const sm = new StateManager(db, projectRoot);
-        return sm.listSessions({ limit: parseInt(opts.limit, 10) });
+        const rows = sm.listSessions({ limit: parseInt(opts.limit, 10) });
+        return rows.map((s) => {
+          const eventCount = Number(
+            db.fetchOne("SELECT COUNT(*) as count FROM audit_events WHERE session_id = ?", [s.id])?.count ?? 0,
+          );
+          return { session: s, eventCount };
+        });
       });
 
       if (!sessions.length) {
+        if (json) {
+          output({ sessions: [] }, { json: true });
+          return;
+        }
         console.log(chalk.dim("No sessions found."));
+        return;
+      }
+
+      if (json) {
+        output(
+          {
+            sessions: sessions.map(({ session: s, eventCount }) => ({
+              id: s.id,
+              objective: s.objective,
+              state: s.state,
+              started_at: s.startedAt,
+              ended_at: s.endedAt,
+              duration_seconds: sessionDurationSeconds(s),
+              operator: s.operator,
+              event_count: eventCount,
+            })),
+          },
+          { json: true },
+        );
         return;
       }
 
@@ -703,7 +823,7 @@ export function registerTeamCommands(program: Command): void {
         failed: chalk.red,
       };
 
-      for (const s of sessions) {
+      for (const { session: s } of sessions) {
         const colorFn = stateColor[s.state] ?? chalk.dim;
         table.push([
           s.id.slice(0, 8) + "...",

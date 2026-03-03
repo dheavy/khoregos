@@ -14,6 +14,7 @@ export interface CheckpointResult {
   gateEvents: { total: number; eventTypes: string[] };
   agentCount: number;
   eventCount: number;
+  durationSeconds: number;
   attestation: string;
 }
 
@@ -26,6 +27,13 @@ function formatDuration(startedAt: string, endedAt: string | null): string {
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
   return `${hours}h ${minutes}m ${seconds}s`;
+}
+
+function durationSeconds(startedAt: string, endedAt: string | null): number {
+  const start = new Date(startedAt).getTime();
+  const end = endedAt ? new Date(endedAt).getTime() : Date.now();
+  const deltaMs = Math.max(0, end - start);
+  return Math.floor(deltaMs / 1000);
 }
 
 export function generateCheckpoint(
@@ -90,6 +98,7 @@ export function generateCheckpoint(
   );
   const agentCount = Number(agentRow?.count ?? 0);
   const timestamp = new Date().toISOString();
+  const duration = durationSeconds(session.startedAt, session.endedAt);
 
   const attestation = [
     "# Khoregos compliance checkpoint",
@@ -118,7 +127,7 @@ export function generateCheckpoint(
     "",
     `Agents: ${agentCount}.`,
     `Total events: ${eventCount}.`,
-    `Duration: ${formatDuration(session.startedAt, session.endedAt)}.`,
+    `Duration: ${formatDuration(session.startedAt, session.endedAt)} (${duration}s).`,
     "",
     "## Attestation",
     "",
@@ -136,6 +145,7 @@ export function generateCheckpoint(
     gateEvents,
     agentCount,
     eventCount,
+    durationSeconds: duration,
     attestation,
   };
 }

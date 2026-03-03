@@ -11,6 +11,7 @@ import { Db } from "../store/db.js";
 import { StateManager } from "../engine/state.js";
 import { AuditLogger } from "../engine/audit.js";
 import { type Session, sessionDurationSeconds } from "../models/session.js";
+import { output, outputError, resolveJsonOption } from "./output.js";
 
 function withDb<T>(projectRoot: string, fn: (db: Db) => T): T {
   const db = new Db(path.join(projectRoot, ".khoregos", "k6s.db"));
@@ -43,20 +44,55 @@ export function registerSessionCommands(program: Command): void {
     .command("list")
     .description("List all sessions")
     .option("-n, --limit <number>", "Maximum sessions to show", "20")
-    .action((opts: { limit: string }) => {
+    .option("--json", "Output in JSON format")
+    .action((opts: { limit: string; json?: boolean }, command: Command) => {
+      const json = resolveJsonOption(opts, command);
       const projectRoot = process.cwd();
       if (!existsSync(path.join(projectRoot, ".khoregos", "k6s.db"))) {
+        if (json) {
+          output({ sessions: [] }, { json: true });
+          return;
+        }
         console.log(chalk.dim("No sessions found."));
         return;
       }
 
       const sessions = withDb(projectRoot, (db) => {
         const sm = new StateManager(db, projectRoot);
-        return sm.listSessions({ limit: parseInt(opts.limit, 10) });
+        const rows = sm.listSessions({ limit: parseInt(opts.limit, 10) });
+        return rows.map((s) => {
+          const eventCount = Number(
+            db.fetchOne("SELECT COUNT(*) as count FROM audit_events WHERE session_id = ?", [s.id])?.count ?? 0,
+          );
+          return { session: s, eventCount };
+        });
       });
 
       if (!sessions.length) {
+        if (json) {
+          output({ sessions: [] }, { json: true });
+          return;
+        }
         console.log(chalk.dim("No sessions found."));
+        return;
+      }
+
+      if (json) {
+        output(
+          {
+            sessions: sessions.map(({ session: s, eventCount }) => ({
+              id: s.id,
+              objective: s.objective,
+              state: s.state,
+              started_at: s.startedAt,
+              ended_at: s.endedAt,
+              duration_seconds: sessionDurationSeconds(s),
+              operator: s.operator,
+              event_count: eventCount,
+            })),
+          },
+          { json: true },
+        );
         return;
       }
 
@@ -72,7 +108,7 @@ export function registerSessionCommands(program: Command): void {
         failed: chalk.red,
       };
 
-      for (const s of sessions) {
+      for (const { session: s } of sessions) {
         const dur = sessionDurationSeconds(s);
         let duration = "-";
         if (dur !== null) {
@@ -98,16 +134,18 @@ export function registerSessionCommands(program: Command): void {
   session
     .command("latest")
     .description("Show the most recent session")
-    .action(() => {
-      showSessionDetails("latest");
+    .option("--json", "Output in JSON format")
+    .action((opts: { json?: boolean }, command: Command) => {
+      showSessionDetails("latest", resolveJsonOption(opts, command));
     });
 
   session
     .command("show")
     .description("Show detailed session information")
     .argument("<session-id>", "Session ID (or prefix). Use 'latest' for most recent.")
-    .action((sessionId: string) => {
-      showSessionDetails(sessionId);
+    .option("--json", "Output in JSON format")
+    .action((sessionId: string, opts: { json?: boolean }, command: Command) => {
+      showSessionDetails(sessionId, resolveJsonOption(opts, command));
     });
 
   session
@@ -216,9 +254,13 @@ export function registerSessionCommands(program: Command): void {
     });
 }
 
-function showSessionDetails(sessionId: string): void {
+function showSessionDetails(sessionId: string, json = false): void {
   const projectRoot = process.cwd();
   if (!existsSync(path.join(projectRoot, ".khoregos", "k6s.db"))) {
+    if (json) {
+      outputError("No sessions found.", "NO_SESSIONS_FOUND", { json: true });
+      process.exit(1);
+    }
     console.log(chalk.yellow("No sessions found."));
     return;
   }
@@ -231,17 +273,70 @@ function showSessionDetails(sessionId: string): void {
     const agents = sm.listAgents(s.id);
     const al = new AuditLogger(db, s.id);
     const eventCount = al.getEventCount();
+    const eventTypeRows = db.fetchAll(
+      "SELECT event_type, COUNT(*) as count FROM audit_events WHERE session_id = ? GROUP BY event_type",
+      [s.id],
+    );
+    const eventSeverityRows = db.fetchAll(
+      "SELECT severity, COUNT(*) as count FROM audit_events WHERE session_id = ? GROUP BY severity",
+      [s.id],
+    );
     const context = sm.loadAllContext(s.id);
 
-    return { session: s, agents, eventCount, context };
+    return { session: s, agents, eventCount, eventTypeRows, eventSeverityRows, context };
   });
 
   if (!data) {
+    if (json) {
+      outputError(`Session not found: ${sessionId}.`, "SESSION_NOT_FOUND", { json: true });
+      process.exit(1);
+    }
     console.error(chalk.red(`Session not found: ${sessionId}`));
     process.exit(1);
   }
 
-  const { session, agents, eventCount, context } = data;
+  const { session, agents, eventCount, eventTypeRows, eventSeverityRows, context } = data;
+  if (json) {
+    const byType: Record<string, number> = {};
+    for (const row of eventTypeRows) {
+      byType[String(row.event_type)] = Number(row.count);
+    }
+    const bySeverity: Record<string, number> = {};
+    for (const row of eventSeverityRows) {
+      bySeverity[String(row.severity)] = Number(row.count);
+    }
+    output(
+      {
+        id: session.id,
+        objective: session.objective,
+        state: session.state,
+        started_at: session.startedAt,
+        ended_at: session.endedAt,
+        parent_session_id: session.parentSessionId,
+        operator: session.operator,
+        hostname: session.hostname,
+        git_branch: session.gitBranch,
+        git_sha: session.gitSha,
+        git_dirty: session.gitDirty,
+        trace_id: session.traceId,
+        k6s_version: session.k6sVersion,
+        agents: agents.map((agent) => ({
+          id: agent.id,
+          name: agent.name,
+          role: agent.role,
+          state: agent.state,
+          spawned_at: agent.spawnedAt,
+        })),
+        event_counts: {
+          total: eventCount,
+          by_type: byType,
+          by_severity: bySeverity,
+        },
+      },
+      { json: true },
+    );
+    return;
+  }
 
   console.log(chalk.bold("Session Details"));
   console.log(`  ${chalk.bold("ID:")} ${session.id}`);
