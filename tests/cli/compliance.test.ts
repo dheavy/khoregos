@@ -16,6 +16,7 @@ const generateCheckpointMock = vi.fn(() => ({
   gateEvents: { total: 2, eventTypes: ["sensitive_needs_review"] },
   agentCount: 1,
   eventCount: 3,
+  durationSeconds: 300,
   attestation: "# Khoregos compliance checkpoint\n",
 }));
 const withDbMock = vi.fn((_projectRoot: string, fn: (db: object) => unknown) => fn({}));
@@ -58,6 +59,8 @@ describe("compliance checkpoint command", () => {
   let projectRoot: string;
   let originalCwd: string;
   let logSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let stdoutSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     vi.resetModules();
@@ -72,10 +75,16 @@ describe("compliance checkpoint command", () => {
     writeFileSync(path.join(projectRoot, ".khoregos", "k6s.db"), "");
     process.chdir(projectRoot);
     logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    exitSpy = vi.spyOn(process, "exit").mockImplementation((code?: string | number | null): never => {
+      throw new Error(`process.exit:${code ?? 0}`);
+    });
   });
 
   afterEach(() => {
     logSpy.mockRestore();
+    stdoutSpy.mockRestore();
+    exitSpy.mockRestore();
     process.chdir(originalCwd);
     rmSync(projectRoot, { recursive: true, force: true });
   });
@@ -109,5 +118,51 @@ describe("compliance checkpoint command", () => {
 
     expect(readFileSync(outputPath, "utf-8")).toBe("# Khoregos compliance checkpoint\n");
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("Wrote compliance checkpoint to"));
+  });
+
+  it("outputs checkpoint JSON when --json is used", async () => {
+    const { registerComplianceCommands } = await import("../../src/cli/compliance.js");
+    const program = new Command();
+    registerComplianceCommands(program);
+
+    await program.parseAsync(
+      ["compliance", "checkpoint", "--session", "latest", "--json"],
+      { from: "user" },
+    );
+
+    const payload = JSON.parse(String(stdoutSpy.mock.calls[0]?.[0])) as {
+      session_id: string;
+      chain_integrity: { result: string };
+      boundary_compliance: { unresolved: number };
+      gate_events: { total: number };
+    };
+    expect(payload.session_id).toBe("session-123");
+    expect(payload.chain_integrity.result).toBe("CHAIN_INTACT");
+    expect(payload.boundary_compliance.unresolved).toBe(0);
+    expect(payload.gate_events.total).toBe(2);
+  });
+
+  it("returns exit code 1 when unresolved violations exist and --exit-code is set", async () => {
+    generateCheckpointMock.mockReturnValueOnce({
+      timestamp: "2026-02-20T12:00:00.000Z",
+      sessionId: "session-123",
+      chainIntegrity: { valid: true, eventsChecked: 3, errors: 0 },
+      violations: { total: 1, reverted: 0, unresolved: 1 },
+      gateEvents: { total: 2, eventTypes: ["sensitive_needs_review"] },
+      agentCount: 1,
+      eventCount: 3,
+      durationSeconds: 300,
+      attestation: "# Khoregos compliance checkpoint\n",
+    });
+    const { registerComplianceCommands } = await import("../../src/cli/compliance.js");
+    const program = new Command();
+    registerComplianceCommands(program);
+
+    await expect(
+      program.parseAsync(
+        ["compliance", "checkpoint", "--session", "latest", "--exit-code"],
+        { from: "user" },
+      ),
+    ).rejects.toThrow("process.exit:1");
   });
 });

@@ -10,7 +10,7 @@ import Table from "cli-table3";
 import { Db } from "../store/db.js";
 import { StateManager } from "../engine/state.js";
 import { AuditLogger, pruneAuditEvents, pruneSessions } from "../engine/audit.js";
-import { loadSigningKey, verifyChain } from "../engine/signing.js";
+import { loadSigningKey, verifyChain, type VerifyError } from "../engine/signing.js";
 import { generateAuditReport, type ReportStandard } from "../engine/report.js";
 import { displayEventType } from "../engine/event-types.js";
 import {
@@ -24,6 +24,7 @@ import type {
   EventType,
 } from "../models/audit.js";
 import { withDb, resolveSessionId } from "./shared.js";
+import { output, outputError, resolveJsonOption } from "./output.js";
 
 function parseDuration(duration: string): string {
   const value = parseInt(duration.slice(0, -1), 10);
@@ -93,6 +94,132 @@ function normalizeExportEvents(raw: unknown): AuditEvent[] {
       && typeof e.eventType === "string"
       && typeof e.action === "string";
   });
+}
+
+function parseJsonObject(value: string | null): Record<string, unknown> {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    return {};
+  }
+  return {};
+}
+
+function parseStringArray(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (Array.isArray(parsed)) {
+      return parsed.filter((item): item is string => typeof item === "string");
+    }
+  } catch {
+    return [];
+  }
+  return [];
+}
+
+type VerifyJsonErrorEntry =
+  | { type: "gap"; missing_sequences: number[] }
+  | { type: "missing_hmac"; event_id: string | null; sequence: number }
+  | {
+      type: "mismatch";
+      event_id: string | null;
+      sequence: number;
+      expected_hmac: string | null;
+      stored_hmac: string | null;
+    };
+
+function mapVerifyErrors(
+  verification: { errors: VerifyError[] },
+  events: AuditEvent[],
+): {
+  gaps: number;
+  missingHmacs: number;
+  mismatches: number;
+  errors: VerifyJsonErrorEntry[];
+} {
+  const eventBySeq = new Map<number, AuditEvent>(events.map((event) => [event.sequence, event]));
+  const gaps = verification.errors.filter((error) => error.type === "gap");
+  const missing = verification.errors.filter((error) => error.type === "missing");
+  const mismatches = verification.errors.filter((error) => error.type === "mismatch");
+
+  const errors = verification.errors.map((error) => {
+    if (error.type === "gap") {
+      const match = /expected (\d+), got (\d+)/.test(error.message)
+        ? error.message.match(/expected (\d+), got (\d+)/)
+        : null;
+      const expected = match ? Number(match[1]) : null;
+      const got = match ? Number(match[2]) : error.sequence;
+      const missingSequences: number[] = [];
+      if (expected !== null && Number.isFinite(expected) && got > expected) {
+        for (let seq = expected; seq < got; seq += 1) {
+          missingSequences.push(seq);
+        }
+      }
+      return {
+        type: "gap",
+        missing_sequences: missingSequences,
+      } as VerifyJsonErrorEntry;
+    }
+
+    const event = eventBySeq.get(error.sequence);
+    if (error.type === "missing") {
+      return {
+        type: "missing_hmac",
+        event_id: event?.id ?? null,
+        sequence: error.sequence,
+      } as VerifyJsonErrorEntry;
+    }
+
+    return {
+      type: "mismatch",
+      event_id: event?.id ?? null,
+      sequence: error.sequence,
+      expected_hmac: error.expected ?? null,
+      stored_hmac: error.actual ?? null,
+    } as VerifyJsonErrorEntry;
+  });
+
+  return {
+    gaps: gaps.length,
+    missingHmacs: missing.length,
+    mismatches: mismatches.length,
+    errors,
+  };
+}
+
+function toVerifyJson(
+  verification: { valid: boolean; eventsChecked: number; errors: VerifyError[] },
+  sessionId: string,
+  events: AuditEvent[],
+): {
+  source: "sqlite";
+  session_id: string;
+  result: "CHAIN_INTACT" | "CHAIN_BROKEN";
+  total_events: number;
+  valid: number;
+  gaps: number;
+  missing_hmacs: number;
+  mismatches: number;
+  errors: VerifyJsonErrorEntry[];
+} {
+  const mapped = mapVerifyErrors(verification, events);
+  const totalFaults = mapped.gaps + mapped.missingHmacs + mapped.mismatches;
+  return {
+    source: "sqlite",
+    session_id: sessionId,
+    result: verification.valid ? "CHAIN_INTACT" : "CHAIN_BROKEN",
+    total_events: verification.eventsChecked,
+    valid: Math.max(0, verification.eventsChecked - totalFaults),
+    gaps: mapped.gaps,
+    missing_hmacs: mapped.missingHmacs,
+    mismatches: mapped.mismatches,
+    errors: mapped.errors,
+  };
 }
 
 export function registerAuditCommands(program: Command): void {
@@ -222,6 +349,7 @@ export function registerAuditCommands(program: Command): void {
     .option("--since <duration>", "Show events since (e.g., '1h', '30m')")
     .option("--trace-id <id>", "Filter by trace/correlation ID")
     .option("-n, --limit <number>", "Maximum events to show", "50")
+    .option("--json", "Output in JSON format")
     .action(
       (opts: {
         session: string;
@@ -231,9 +359,26 @@ export function registerAuditCommands(program: Command): void {
         since?: string;
         traceId?: string;
         limit: string;
-      }) => {
+        json?: boolean;
+      },
+      command: Command) => {
+        const json = resolveJsonOption(opts, command);
+        const filtersApplied = {
+          session_id: opts.session === "latest" ? null : opts.session,
+          agent: opts.agent ?? null,
+          type: opts.type ?? null,
+          severity: opts.severity ?? null,
+          since: opts.since ?? null,
+          trace_id: opts.traceId ?? null,
+          limit: parseInt(opts.limit, 10),
+        };
+        const emptyPayload = { events: [], total_count: 0, filters_applied: filtersApplied };
         const projectRoot = process.cwd();
         if (!existsSync(path.join(projectRoot, ".khoregos", "k6s.db"))) {
+          if (json) {
+            output(emptyPayload, { json: true });
+            return;
+          }
           console.log(chalk.yellow("No audit data found."));
           return;
         }
@@ -244,7 +389,7 @@ export function registerAuditCommands(program: Command): void {
           if (!sessionId) return null;
 
           const al = new AuditLogger(db, sessionId);
-          const events = al.getEvents({
+          let events = al.getEvents({
             limit: parseInt(opts.limit, 10),
             eventType: opts.type as EventType | undefined,
             since: opts.since ? parseDuration(opts.since) : undefined,
@@ -252,13 +397,52 @@ export function registerAuditCommands(program: Command): void {
             traceId: opts.traceId,
           });
 
-          // Build agent ID -> name map for display.
+          // Build agent ID -> name map for display and JSON metadata.
           const agents = sm.listAgents(sessionId);
           const agentNameById = new Map(agents.map((a) => [a.id, a.name]));
+          if (opts.agent) {
+            const normalizedFilter = opts.agent.toLowerCase();
+            events = events.filter((event) => {
+              const name = event.agentId ? (agentNameById.get(event.agentId) ?? "") : "";
+              return name.toLowerCase() === normalizedFilter;
+            });
+          }
 
           const session = sm.getSession(sessionId);
           return { events, sessionId, agentNameById, traceId: session?.traceId };
         });
+
+        if (json) {
+          if (!result) {
+            output(emptyPayload, { json: true });
+            return;
+          }
+          output(
+            {
+              events: result.events.map((event) => ({
+                id: event.id,
+                sequence: event.sequence,
+                session_id: event.sessionId,
+                agent_id: event.agentId,
+                agent_name: event.agentId ? (result.agentNameById.get(event.agentId) ?? null) : null,
+                timestamp: event.timestamp,
+                event_type: event.eventType,
+                action: event.action,
+                severity: event.severity,
+                files_affected: parseStringArray(event.filesAffected),
+                details: parseJsonObject(event.details),
+              })),
+              total_count: result.events.length,
+              filters_applied: {
+                ...filtersApplied,
+                session_id: result.sessionId,
+                trace_id: opts.traceId ?? result.traceId ?? null,
+              },
+            },
+            { json: true },
+          );
+          return;
+        }
 
         if (!result || !result.events.length) {
           console.log(chalk.dim("No events found."));
@@ -529,7 +713,9 @@ export function registerAuditCommands(program: Command): void {
       signingKey?: string;
       json?: boolean;
       exitCode?: boolean;
-    }) => {
+    },
+    command: Command) => {
+      const json = resolveJsonOption(opts, command);
       const projectRoot = process.cwd();
       const khoregoDir = path.join(projectRoot, ".khoregos");
 
@@ -538,7 +724,7 @@ export function registerAuditCommands(program: Command): void {
         const sessionFile = path.join(exportDir, "session.json");
         const auditFile = path.join(exportDir, "audit-trail.json");
         if (!existsSync(sessionFile) || !existsSync(auditFile)) {
-          console.error(chalk.red("Export directory is missing session.json or audit-trail.json."));
+          outputError("Export directory is missing session.json or audit-trail.json.", "EXPORT_MISSING_FILES", { json });
           process.exit(1);
         }
 
@@ -551,7 +737,7 @@ export function registerAuditCommands(program: Command): void {
           );
         } catch (error) {
           const message = error instanceof Error ? error.message : "failed to parse export files";
-          console.error(chalk.red(`Error: ${message}.`));
+          outputError(`Error: ${message}.`, "EXPORT_PARSE_ERROR", { json });
           process.exit(1);
         }
 
@@ -564,21 +750,21 @@ export function registerAuditCommands(program: Command): void {
         const attestedValid = chainIntegrity === "CHAIN_INTACT";
 
         let strictResult:
-          | { valid: boolean; eventsChecked: number; errors: number }
+          | { valid: boolean; eventsChecked: number; errors: VerifyError[] }
           | null = null;
         if (opts.strict) {
           const signingKeyPath = opts.signingKey ?? process.env.K6S_SIGNING_KEY;
           if (!signingKeyPath) {
-            console.error(
-              chalk.red(
-                "Strict verification requires --signing-key <path> or K6S_SIGNING_KEY.",
-              ),
+            outputError(
+              "Strict verification requires --signing-key <path> or K6S_SIGNING_KEY.",
+              "SIGNING_KEY_REQUIRED",
+              { json },
             );
             process.exit(1);
           }
           const resolvedKeyPath = path.resolve(projectRoot, signingKeyPath);
           if (!existsSync(resolvedKeyPath)) {
-            console.error(chalk.red(`Signing key not found: ${resolvedKeyPath}.`));
+            outputError(`Signing key not found: ${resolvedKeyPath}.`, "SIGNING_KEY_NOT_FOUND", { json });
             process.exit(1);
           }
           const keyHex = readFileSync(resolvedKeyPath, "utf-8").trim();
@@ -587,28 +773,37 @@ export function registerAuditCommands(program: Command): void {
           strictResult = {
             valid: verification.valid,
             eventsChecked: verification.eventsChecked,
-            errors: verification.errors.length,
+            errors: verification.errors,
           };
         }
 
         const finalValid = strictResult ? strictResult.valid : attestedValid;
-        if (opts.json) {
-          console.log(
-            JSON.stringify(
-              {
-                source: "export",
-                session_id: sessionId,
-                chain_integrity: chainIntegrity,
-                attested_valid: attestedValid,
-                strict_checked: Boolean(strictResult),
-                strict_valid: strictResult?.valid ?? null,
-                events_checked: strictResult?.eventsChecked ?? exportEvents.length,
-                errors: strictResult?.errors ?? 0,
-                valid: finalValid,
-              },
-              null,
-              2,
-            ),
+        if (json) {
+          const verification = strictResult ?? {
+            valid: finalValid,
+            eventsChecked: exportEvents.length,
+            errors: [] as VerifyError[],
+          };
+          const mapped = mapVerifyErrors(verification, exportEvents);
+          const totalFaults = mapped.gaps + mapped.missingHmacs + mapped.mismatches;
+
+          output(
+            {
+              source: "export",
+              session_id: sessionId,
+              result: finalValid ? "CHAIN_INTACT" : "CHAIN_BROKEN",
+              chain_integrity: chainIntegrity,
+              attested_valid: attestedValid,
+              strict_checked: Boolean(strictResult),
+              strict_valid: strictResult?.valid ?? null,
+              total_events: verification.eventsChecked,
+              valid: Math.max(0, verification.eventsChecked - totalFaults),
+              gaps: mapped.gaps,
+              missing_hmacs: mapped.missingHmacs,
+              mismatches: mapped.mismatches,
+              errors: mapped.errors,
+            },
+            { json: true },
           );
         } else {
           console.log(`${chalk.bold("Source:")} export`);
@@ -617,7 +812,7 @@ export function registerAuditCommands(program: Command): void {
           if (strictResult) {
             console.log(`${chalk.bold("Strict re-verify:")} ${strictResult.valid ? "valid" : "invalid"}`);
             console.log(`${chalk.bold("Events checked:")} ${strictResult.eventsChecked}`);
-            console.log(`${chalk.bold("Errors:")} ${strictResult.errors}`);
+            console.log(`${chalk.bold("Errors:")} ${strictResult.errors.length}`);
           }
           console.log(
             `${chalk.bold("Result:")} ${finalValid ? chalk.green("valid") : chalk.red("invalid")}`,
@@ -631,12 +826,20 @@ export function registerAuditCommands(program: Command): void {
       }
 
       if (!existsSync(path.join(khoregoDir, "k6s.db"))) {
+        if (json) {
+          outputError("No audit data found.", "NO_AUDIT_DATA", { json: true });
+        } else {
         console.log(chalk.yellow("No audit data found."));
+        }
         return;
       }
 
       const key = loadSigningKey(khoregoDir);
       if (!key) {
+        if (json) {
+          outputError("No signing key found. Run k6s init to generate one.", "SIGNING_KEY_NOT_FOUND", { json: true });
+          return;
+        }
         console.log(
           chalk.yellow("No signing key found.") +
             " Run " +
@@ -672,38 +875,34 @@ export function registerAuditCommands(program: Command): void {
             severity: ((row.severity as string) ?? "info") as AuditSeverity,
           })) as AuditEvent[];
 
-        return { sessionId, verification: verifyChain(key, sessionId, events) };
+        return { sessionId, events, verification: verifyChain(key, sessionId, events) };
       });
 
       if (!result) {
+        if (json) {
+          outputError("No session found.", "SESSION_NOT_FOUND", { json: true });
+          process.exit(1);
+        }
         console.log(chalk.yellow("No session found."));
         return;
       }
 
-      const { sessionId, verification } = result;
-      console.log(`${chalk.bold("Session:")} ${sessionId.slice(0, 8)}...`);
-      console.log(
-        `${chalk.bold("Events checked:")} ${verification.eventsChecked}`,
-      );
-      console.log();
-
-      if (opts.json) {
-        console.log(
-          JSON.stringify(
-            {
-              source: "sqlite",
-              session_id: sessionId,
-              events_checked: verification.eventsChecked,
-              errors: verification.errors.length,
-              valid: verification.valid,
-            },
-            null,
-            2,
-          ),
-        );
+      const { sessionId, events, verification } = result;
+      if (json) {
+        output(toVerifyJson(verification, sessionId, events), { json: true });
       } else if (verification.valid) {
+        console.log(`${chalk.bold("Session:")} ${sessionId.slice(0, 8)}...`);
+        console.log(
+          `${chalk.bold("Events checked:")} ${verification.eventsChecked}`,
+        );
+        console.log();
         console.log(chalk.green("✓ Audit chain integrity verified."));
       } else {
+        console.log(`${chalk.bold("Session:")} ${sessionId.slice(0, 8)}...`);
+        console.log(
+          `${chalk.bold("Events checked:")} ${verification.eventsChecked}`,
+        );
+        console.log();
         console.log(
           chalk.red(`✗ ${verification.errors.length} issue(s) found:`),
         );
@@ -734,9 +933,15 @@ export function registerAuditCommands(program: Command): void {
       "generic",
     )
     .option("-o, --output <file>", "Write report to file (stdout if omitted)")
-    .action((opts: { session: string; standard: string; output?: string }) => {
+    .option("--json", "Output in JSON format")
+    .action((opts: { session: string; standard: string; output?: string; json?: boolean }, command: Command) => {
+      const json = resolveJsonOption(opts, command);
       const projectRoot = process.cwd();
       if (!existsSync(path.join(projectRoot, ".khoregos", "k6s.db"))) {
+        if (json) {
+          outputError("No audit data found.", "NO_AUDIT_DATA", { json: true });
+          process.exit(1);
+        }
         console.log(chalk.yellow("No audit data found."));
         return;
       }
@@ -746,26 +951,132 @@ export function registerAuditCommands(program: Command): void {
         standard = parseReportStandard(opts.standard);
       } catch (error) {
         const message = error instanceof Error ? error.message : "invalid report standard";
-        console.error(chalk.red(`Error: ${message}.`));
+        outputError(`Error: ${message}.`, "INVALID_STANDARD", { json });
         process.exit(1);
       }
       const report = withDb(projectRoot, (db) => {
         const sm = new StateManager(db, projectRoot);
         const sessionId = resolveSessionId(sm, opts.session);
         if (!sessionId) return null;
-        return generateAuditReport(db, sessionId, projectRoot, standard);
+        if (!json) {
+          return generateAuditReport(db, sessionId, projectRoot, standard);
+        }
+
+        const session = sm.getSession(sessionId);
+        if (!session) return null;
+        const agents = sm.listAgents(sessionId);
+        const logger = new AuditLogger(db, sessionId);
+        const eventsDesc = logger.getEvents({ limit: 100000 });
+        const events = [...eventsDesc].reverse();
+
+        const signingKey = loadSigningKey(path.join(projectRoot, ".khoregos"));
+        const verification = signingKey
+          ? verifyChain(signingKey, sessionId, events)
+          : { valid: false, eventsChecked: events.length, errors: [] as VerifyError[] };
+        const byType: Record<string, number> = {};
+        const bySeverity: Record<string, number> = {};
+        const filesModified = new Set<string>();
+        for (const event of events) {
+          byType[event.eventType] = (byType[event.eventType] ?? 0) + 1;
+          bySeverity[event.severity] = (bySeverity[event.severity] ?? 0) + 1;
+          for (const filePath of parseStringArray(event.filesAffected)) {
+            filesModified.add(filePath);
+          }
+        }
+
+        const boundaryRows = db.fetchAll(
+          "SELECT id, agent_id, file_path, violation_type, enforcement_action, timestamp FROM boundary_violations WHERE session_id = ? ORDER BY timestamp ASC",
+          [sessionId],
+        );
+        const agentNameById = new Map(agents.map((agent) => [agent.id, agent.name]));
+        const gateRows = db.fetchAll(
+          "SELECT id, gate_id, action, details, timestamp FROM audit_events WHERE session_id = ? AND event_type = 'gate_triggered' ORDER BY sequence ASC",
+          [sessionId],
+        );
+
+        return {
+          session: {
+            id: session.id,
+            objective: session.objective,
+            operator: session.operator,
+            hostname: session.hostname,
+            git_branch: session.gitBranch,
+            git_sha: session.gitSha,
+            started_at: session.startedAt,
+            ended_at: session.endedAt,
+            duration_seconds: session.endedAt
+              ? Math.max(
+                  0,
+                  Math.floor((new Date(session.endedAt).getTime() - new Date(session.startedAt).getTime()) / 1000),
+                )
+              : null,
+            trace_id: session.traceId,
+            k6s_version: session.k6sVersion,
+          },
+          agents: agents.map((agent) => ({
+            name: agent.name,
+            role: agent.role,
+            state: agent.state,
+            spawned_at: agent.spawnedAt,
+          })),
+          chain_integrity: {
+            result: verification.valid ? "CHAIN_INTACT" : "CHAIN_BROKEN",
+            total_events: verification.eventsChecked,
+            valid: Math.max(0, verification.eventsChecked - verification.errors.length),
+            gaps: verification.errors.filter((error) => error.type === "gap").length,
+            mismatches: verification.errors.filter((error) => error.type === "mismatch").length,
+          },
+          events_summary: {
+            by_type: byType,
+            by_severity: bySeverity,
+          },
+          files_modified: [...filesModified].sort((a, b) => a.localeCompare(b)),
+          boundary_violations: boundaryRows.map((row) => ({
+            id: row.id,
+            agent_name: row.agent_id ? (agentNameById.get(String(row.agent_id)) ?? null) : null,
+            file_path: row.file_path,
+            violation_type: row.violation_type,
+            enforcement_action: row.enforcement_action,
+            timestamp: row.timestamp,
+          })),
+          gate_events: gateRows.map((row) => {
+            const details = parseJsonObject((row.details as string) ?? null);
+            return {
+              id: row.id,
+              gate_id: row.gate_id,
+              gate_name: typeof details.rule_name === "string" ? details.rule_name : null,
+              file_path: typeof details.file === "string" ? details.file : null,
+              timestamp: row.timestamp,
+            };
+          }),
+        };
       });
 
       if (!report) {
+        if (json) {
+          outputError("No session found.", "SESSION_NOT_FOUND", { json: true });
+          process.exit(1);
+        }
         console.log(chalk.yellow("No session found."));
         return;
       }
 
+      if (json) {
+        if (opts.output) {
+          writeFileSync(opts.output, JSON.stringify(report, null, 2));
+          console.log(chalk.green("✓") + ` Wrote audit report to ${opts.output}`);
+        } else {
+          output(report, { json: true });
+        }
+        return;
+      }
+
+      const markdownReport = report as string;
       if (opts.output) {
-        writeFileSync(opts.output, report);
+        writeFileSync(opts.output, markdownReport);
         console.log(chalk.green("✓") + ` Wrote audit report to ${opts.output}`);
       } else {
-        console.log(report);
+        console.log(markdownReport);
       }
     });
 }

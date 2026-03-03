@@ -2,7 +2,7 @@
  * Main CLI entry point for Khoregos.
  */
 
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { Command } from 'commander';
 import chalk from 'chalk';
@@ -27,22 +27,42 @@ import {
 } from '../models/config.js';
 import { K6sServer } from '../mcp/server.js';
 import { Db } from '../store/db.js';
+import { StateManager } from '../engine/state.js';
 import { registerTeamCommands } from './team.js';
 import { registerSessionCommands } from './session.js';
 import { registerAuditCommands } from './audit.js';
 import { registerHookCommands } from './hook.js';
 import { registerComplianceCommands } from './compliance.js';
 import { registerExportCommand } from './export.js';
+import { output, outputError, resolveJsonOption } from './output.js';
 import { VERSION } from '../version.js';
 
 const program = new Command();
+
+function hasRegisteredHooks(hooks: unknown): boolean {
+  if (!hooks) return false;
+  if (Array.isArray(hooks)) {
+    return hooks.length > 0;
+  }
+  if (typeof hooks !== 'object') return false;
+  const hookGroups = Object.values(hooks as Record<string, unknown>);
+  if (hookGroups.length === 0) return false;
+  return hookGroups.some((group) => {
+    if (!Array.isArray(group) || group.length === 0) return false;
+    return group.some((entry) => {
+      const nested = (entry as Record<string, unknown>).hooks;
+      return Array.isArray(nested) && nested.length > 0;
+    });
+  });
+}
 
 program
   .name('k6s')
   .description(
     'Khoregos: Enterprise governance layer for Claude Code Agent Teams',
   )
-  .version(VERSION);
+  .version(VERSION)
+  .option('--json', 'Output in JSON format');
 
 // Subcommands
 registerTeamCommands(program);
@@ -248,25 +268,98 @@ program
 program
   .command('status')
   .description('Show current Khoregos status')
-  .action(() => {
+  .option('--json', 'Output in JSON format')
+  .action((opts: { json?: boolean }, command: Command) => {
+    const json = resolveJsonOption(opts, command);
     const projectRoot = process.cwd();
     const configFile = path.join(projectRoot, 'k6s.yaml');
+    const settingsFile = path.join(projectRoot, '.claude', 'settings.json');
 
     if (!existsSync(configFile)) {
+      if (json) {
+        outputError('Not initialized. Run k6s init first.', 'NOT_INITIALIZED', { json: true });
+      } else {
       console.log(
         chalk.yellow('Not initialized.') +
           ' Run ' +
           chalk.bold('k6s init') +
           ' first.',
       );
+      }
       process.exit(1);
+    }
+
+    let mcpRegistered = false;
+    let hooksRegistered = false;
+    if (isPluginInstalled(projectRoot)) {
+      mcpRegistered = true;
+      hooksRegistered = true;
+    } else if (existsSync(settingsFile)) {
+      try {
+        const settings = JSON.parse(readFileSync(settingsFile, 'utf-8')) as Record<string, unknown>;
+        const mcpServers = settings.mcpServers as Record<string, unknown> | undefined;
+        mcpRegistered = Boolean(mcpServers?.khoregos);
+        hooksRegistered = hasRegisteredHooks(settings.hooks);
+      } catch {
+        mcpRegistered = false;
+        hooksRegistered = false;
+      }
+    }
+
+    const daemon = new DaemonState(path.join(projectRoot, '.khoregos'));
+    const daemonRunning = daemon.isRunning();
+    if (json) {
+      let activeSession: Record<string, unknown> | null = null;
+      if (daemonRunning) {
+        const state = daemon.readState();
+        const sessionId = (state.session_id as string) ?? 'unknown';
+        if (existsSync(path.join(projectRoot, '.khoregos', 'k6s.db'))) {
+          const db = new Db(path.join(projectRoot, '.khoregos', 'k6s.db'));
+          db.connect();
+          try {
+            const sm = new StateManager(db, projectRoot);
+            const session = sm.getSession(sessionId);
+            activeSession = {
+              session_id: session?.id ?? sessionId,
+              objective: session?.objective ?? null,
+              state: session?.state ?? 'active',
+              started_at: session?.startedAt ?? null,
+              operator: session?.operator ?? null,
+              git_branch: session?.gitBranch ?? null,
+              trace_id: session?.traceId ?? null,
+            };
+          } finally {
+            db.close();
+          }
+        } else {
+          activeSession = {
+            session_id: sessionId,
+            objective: null,
+            state: 'active',
+            started_at: null,
+            operator: null,
+            git_branch: null,
+            trace_id: null,
+          };
+        }
+      }
+
+      output(
+        {
+          active_session: activeSession,
+          daemon_running: daemonRunning,
+          mcp_registered: mcpRegistered,
+          hooks_registered: hooksRegistered,
+        },
+        { json: true },
+      );
+      return;
     }
 
     console.log(`${chalk.bold('Project:')} ${path.basename(projectRoot)}`);
     console.log(`${chalk.bold('Config:')} ${configFile}`);
 
-    const daemon = new DaemonState(path.join(projectRoot, '.khoregos'));
-    if (daemon.isRunning()) {
+    if (daemonRunning) {
       const state = daemon.readState();
       const sessionId = (state.session_id as string) ?? 'unknown';
       console.log(`${chalk.bold('Status:')} ${chalk.green('Active')}`);
