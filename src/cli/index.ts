@@ -32,6 +32,7 @@ import { registerSessionCommands } from './session.js';
 import { registerAuditCommands } from './audit.js';
 import { registerHookCommands } from './hook.js';
 import { registerComplianceCommands } from './compliance.js';
+import { registerExportCommand } from './export.js';
 import { VERSION } from '../version.js';
 
 const program = new Command();
@@ -49,6 +50,7 @@ registerSessionCommands(program);
 registerAuditCommands(program);
 registerHookCommands(program);
 registerComplianceCommands(program);
+registerExportCommand(program);
 
 // init
 program

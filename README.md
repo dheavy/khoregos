@@ -172,9 +172,8 @@ When the plugin is not installed, `k6s team start` falls back to direct filesyst
 
 ## Roadmap
 
-- **Phase 6.** Complete.
-- **Phase 7.** CI/CD integration and developer experience: JSON output, git export of governance state, configuration presets.
-- **Phase 8.** Distribution and ecosystem integration: npm global publishing, PR/MR templates, SAST webhook templates.
+- **Phase 7.** JSON output, git export, and developer experience: `--json` flag, `--exit-code` for scripting, git export with `--from-export` verification, configuration presets.
+- **Phase 8.** Distribution and ecosystem integration: npm global publishing, PR/MR templates consuming exported governance data, SAST webhook templates.
 
 ## Documentation
 
