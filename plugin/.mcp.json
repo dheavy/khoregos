@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "khoregos": {
+      "command": "k6s",
+      "args": [
+        "mcp",
+        "serve",
+        "--project-root",
+        "."
+      ]
+    }
+  }
+}

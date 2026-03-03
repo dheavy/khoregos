@@ -1,0 +1,28 @@
+{
+  "hooks": [
+    {
+      "event": "PostToolUse",
+      "type": "command",
+      "command": "k6s hook post-tool-use",
+      "timeout": 10
+    },
+    {
+      "event": "SubagentStart",
+      "type": "command",
+      "command": "k6s hook subagent-start",
+      "timeout": 10
+    },
+    {
+      "event": "SubagentStop",
+      "type": "command",
+      "command": "k6s hook subagent-stop",
+      "timeout": 10
+    },
+    {
+      "event": "Stop",
+      "type": "command",
+      "command": "k6s hook session-stop",
+      "timeout": 10
+    }
+  ]
+}

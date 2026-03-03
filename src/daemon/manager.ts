@@ -99,41 +99,71 @@ export class DaemonState {
   }
 }
 
+type SessionGovernanceBoundary = {
+  pattern?: string;
+  allowed_paths?: string[];
+  forbidden_paths?: string[];
+  enforcement?: string;
+};
+
+type SessionGovernanceInput = {
+  sessionId: string;
+  objective: string;
+  traceId: string;
+  signingEnabled: boolean;
+  boundaries: SessionGovernanceBoundary[];
+  resumeContext?: string;
+};
+
+function formatBoundaries(boundaries: SessionGovernanceBoundary[]): string {
+  if (boundaries.length === 0) {
+    return "- No explicit boundaries configured.\n";
+  }
+
+  return boundaries
+    .map((boundary, index) => {
+      const allowed = (boundary.allowed_paths ?? []).join(", ") || "(none)";
+      const forbidden = (boundary.forbidden_paths ?? []).join(", ") || "(none)";
+      const enforcement = boundary.enforcement ?? "warn";
+      const pattern = boundary.pattern ?? "*";
+      return [
+        `- Rule ${index + 1} (${pattern}):`,
+        `  - Allowed: ${allowed}`,
+        `  - Forbidden: ${forbidden}`,
+        `  - Enforcement: ${enforcement}`,
+      ].join("\n");
+    })
+    .join("\n");
+}
+
 export function injectClaudeMdGovernance(
   projectRoot: string,
-  sessionId: string,
+  input: SessionGovernanceInput,
 ): void {
   const claudeDir = path.join(projectRoot, ".claude");
   mkdirSync(claudeDir, { recursive: true });
   const claudeMd = path.join(claudeDir, "CLAUDE.md");
+  const contextBlock = input.resumeContext
+    ? `\n### Previous session context\n\n${input.resumeContext}\n`
+    : "";
+  const signingStatus = input.signingEnabled ? "enabled" : "disabled";
+  const boundariesSection = formatBoundaries(input.boundaries);
 
   const governanceSection = `
 
 ## Khoregos Governance (Auto-generated — do not edit)
 
-This project uses Khoregos (k6s) for governance. Session ID: ${sessionId}
+Session metadata:
 
-All agents MUST:
+- Workspace governance ID: ${input.sessionId}
+- Objective: ${input.objective}
+- Trace ID: ${input.traceId}
+- Audit signing: ${signingStatus}
 
-1. **Log significant actions** using the \`k6s_log\` MCP tool before and after:
-   - Creating or modifying files
-   - Making architectural decisions
-   - Completing tasks
+### Active boundary rules
 
-2. **Check boundaries** using \`k6s_get_boundaries\` at session start
-   - Only modify files within your allowed paths
-   - Never touch forbidden paths
-   - Use \`k6s_check_path\` before modifying any file you're unsure about
-
-3. **Use file locks** via \`k6s_acquire_lock\` / \`k6s_release_lock\` when
-   editing shared files to prevent conflicts
-
-4. **Save context** using \`k6s_save_context\` when:
-   - Making important decisions (save rationale)
-   - Completing major milestones
-   - Before ending your session
-
-5. **Load context** using \`k6s_load_context\` to retrieve previously saved state
+${boundariesSection}${contextBlock}
+This section contains only session-specific governance context. Generic governance behavior is provided by the Khoregos Claude Code plugin skill.
 
 <!-- K6S_GOVERNANCE_END -->
 `;
@@ -170,6 +200,59 @@ export function removeClaudeMdGovernance(projectRoot: string): void {
     const newContent = content.slice(0, start).trimEnd() + content.slice(endFull);
     writeSecureFile(claudeMd, newContent);
   }
+}
+
+function commandUsesPluginK6s(command: unknown): boolean {
+  if (typeof command !== "string") return false;
+  const normalized = command.trim();
+  return normalized.startsWith("k6s ");
+}
+
+/**
+ * Detect whether the Claude Code plugin appears installed for this project.
+ * Conservative behavior: return false on parse errors or uncertain states.
+ */
+export function isPluginInstalled(projectRoot: string): boolean {
+  const settingsPath = path.join(projectRoot, ".claude", "settings.json");
+  if (!existsSync(settingsPath)) return false;
+
+  try {
+    const settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as Record<string, unknown>;
+    const mcpServers = settings.mcpServers as Record<string, unknown> | undefined;
+    const khoregosServer = mcpServers?.khoregos as Record<string, unknown> | undefined;
+    if (khoregosServer?.command === "k6s") {
+      return true;
+    }
+
+    const hooksRecord = settings.hooks as Record<string, unknown> | undefined;
+    const postToolUse = hooksRecord?.PostToolUse;
+    if (Array.isArray(postToolUse)) {
+      for (const group of postToolUse) {
+        const nestedHooks = (group as Record<string, unknown>).hooks;
+        if (!Array.isArray(nestedHooks)) continue;
+        for (const hook of nestedHooks) {
+          const cmd = (hook as Record<string, unknown>).command;
+          if (commandUsesPluginK6s(cmd)) {
+            return true;
+          }
+        }
+      }
+    }
+
+    const hooksArray = settings.hooks;
+    if (Array.isArray(hooksArray)) {
+      for (const hook of hooksArray) {
+        const cmd = (hook as Record<string, unknown>).command;
+        if (commandUsesPluginK6s(cmd)) {
+          return true;
+        }
+      }
+    }
+  } catch {
+    return false;
+  }
+
+  return false;
 }
 
 function loadClaudeSettings(
