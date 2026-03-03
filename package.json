@@ -12,7 +12,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/cli/index.ts",
-    "test": "vitest"
+    "test": "vitest",
+    "version": "node scripts/sync-plugin-version.js && git add plugin/.claude-plugin/plugin.json .claude-plugin/marketplace.json"
   },
   "keywords": [
     "claude",

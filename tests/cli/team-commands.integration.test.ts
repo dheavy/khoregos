@@ -10,7 +10,9 @@ import path from "node:path";
 
 const registerMcpServerMock = vi.fn();
 const registerHooksMock = vi.fn();
+const unregisterMcpServerMock = vi.fn();
 const unregisterHooksMock = vi.fn();
+const isPluginInstalledMock = vi.fn(() => false);
 const injectClaudeMdGovernanceMock = vi.fn();
 const removeClaudeMdGovernanceMock = vi.fn();
 const auditLoggerStartMock = vi.fn();
@@ -62,7 +64,9 @@ vi.mock("../../src/daemon/manager.js", () => {
     DaemonState: MockDaemonState,
     registerMcpServer: registerMcpServerMock,
     registerHooks: registerHooksMock,
+    unregisterMcpServer: unregisterMcpServerMock,
     unregisterHooks: unregisterHooksMock,
+    isPluginInstalled: (...args: unknown[]) => isPluginInstalledMock(...args),
     injectClaudeMdGovernance: injectClaudeMdGovernanceMock,
     removeClaudeMdGovernance: removeClaudeMdGovernanceMock,
   };
@@ -192,6 +196,9 @@ describe("team commands integration", () => {
     registerMcpServerMock.mockClear();
     registerHooksMock.mockClear();
     unregisterHooksMock.mockClear();
+    unregisterMcpServerMock.mockClear();
+    isPluginInstalledMock.mockClear();
+    isPluginInstalledMock.mockReturnValue(false);
     injectClaudeMdGovernanceMock.mockClear();
     removeClaudeMdGovernanceMock.mockClear();
     loadConfigMock.mockClear();
@@ -242,8 +249,26 @@ describe("team commands integration", () => {
 
     expect(removeClaudeMdGovernanceMock).toHaveBeenCalledTimes(1);
     expect(unregisterHooksMock).toHaveBeenCalledTimes(1);
+    expect(unregisterMcpServerMock).toHaveBeenCalledTimes(1);
     expect(killSpy).toHaveBeenCalledWith(13579, "SIGTERM");
     expect(existsSync(pidPath)).toBe(false);
+  });
+
+  it("team start and stop skip registration cleanup when plugin is installed", async () => {
+    isPluginInstalledMock.mockReturnValue(true);
+    const { registerTeamCommands } = await import("../../src/cli/team.js");
+    const program = new Command();
+    registerTeamCommands(program);
+
+    await program.parseAsync(["team", "start", "plugin objective"], { from: "user" });
+    await program.parseAsync(["team", "stop"], { from: "user" });
+
+    expect(registerMcpServerMock).not.toHaveBeenCalled();
+    expect(registerHooksMock).not.toHaveBeenCalled();
+    expect(unregisterHooksMock).not.toHaveBeenCalled();
+    expect(unregisterMcpServerMock).not.toHaveBeenCalled();
+    expect(injectClaudeMdGovernanceMock).toHaveBeenCalledTimes(1);
+    expect(removeClaudeMdGovernanceMock).toHaveBeenCalledTimes(1);
   });
 
   it("team start fails when strict enforcement is configured outside git", async () => {

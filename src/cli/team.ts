@@ -12,10 +12,12 @@ import Table from "cli-table3";
 import {
   DaemonState,
   injectClaudeMdGovernance,
+  isPluginInstalled,
   registerHooks,
   registerMcpServer,
   removeClaudeMdGovernance,
   unregisterHooks,
+  unregisterMcpServer,
 } from "../daemon/manager.js";
 import {
   AuditLogger,
@@ -325,6 +327,7 @@ export function registerTeamCommands(program: Command): void {
         return s;
       });
 
+      const pluginManaged = isPluginInstalled(projectRoot);
       if (config.plugins.length > 0) {
         const pluginManager = new PluginManager();
         await pluginManager.loadPlugins(config.plugins, session.id, projectRoot);
@@ -336,12 +339,22 @@ export function registerTeamCommands(program: Command): void {
 
       console.log(chalk.green("✓") + ` Session ${chalk.bold(session.id.slice(0, 8) + "...")} created`);
 
-      injectClaudeMdGovernance(projectRoot, session.id);
-      console.log(chalk.green("✓") + " CLAUDE.md updated with governance rules");
+      injectClaudeMdGovernance(projectRoot, {
+        sessionId: session.id,
+        objective,
+        traceId: session.traceId ?? "unknown",
+        signingEnabled: true,
+        boundaries: config.boundaries,
+      });
+      console.log(chalk.green("✓") + " CLAUDE.md updated with session governance context");
 
-      registerMcpServer(projectRoot);
-      registerHooks(projectRoot);
-      console.log(chalk.green("✓") + " MCP server and hooks registered");
+      if (pluginManaged) {
+        console.log(chalk.green("✓") + " Plugin-managed hooks/MCP detected");
+      } else {
+        registerMcpServer(projectRoot);
+        registerHooks(projectRoot);
+        console.log(chalk.green("✓") + " MCP server and hooks registered");
+      }
 
       // Atomic state file creation — prevents race if two `team start`
       // commands run concurrently (the isRunning() check above is a fast
@@ -423,8 +436,12 @@ export function registerTeamCommands(program: Command): void {
         setPluginManager(null);
       }
 
+      const pluginManaged = isPluginInstalled(projectRoot);
       removeClaudeMdGovernance(projectRoot);
-      unregisterHooks(projectRoot);
+      if (!pluginManaged) {
+        unregisterHooks(projectRoot);
+        unregisterMcpServer(projectRoot);
+      }
       daemon.removeState();
       stopTelemetryDaemon(projectRoot);
 
@@ -558,7 +575,7 @@ export function registerTeamCommands(program: Command): void {
         });
         logger.stop();
 
-        return { prev, newSession };
+        return { prev, newSession, context };
       });
 
       if (!result) {
@@ -578,9 +595,19 @@ export function registerTeamCommands(program: Command): void {
       console.log(chalk.green("✓") + ` Resuming from session ${chalk.bold(result.prev.id.slice(0, 8) + "...")}`);
       console.log(`${chalk.bold("Objective:")} ${result.prev.objective}`);
 
-      injectClaudeMdGovernance(projectRoot, result.newSession.id);
-      registerMcpServer(projectRoot);
-      registerHooks(projectRoot);
+      const pluginManaged = isPluginInstalled(projectRoot);
+      injectClaudeMdGovernance(projectRoot, {
+        sessionId: result.newSession.id,
+        objective: result.newSession.objective,
+        traceId: result.newSession.traceId ?? "unknown",
+        signingEnabled: true,
+        boundaries: config.boundaries,
+        resumeContext: result.context,
+      });
+      if (!pluginManaged) {
+        registerMcpServer(projectRoot);
+        registerHooks(projectRoot);
+      }
 
       // Atomic state file creation — same race guard as team start.
       if (!daemon.createState({ session_id: result.newSession.id })) {
