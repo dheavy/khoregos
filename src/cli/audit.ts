@@ -2,7 +2,7 @@
  * Audit trail CLI commands.
  */
 
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { Command } from "commander";
 import chalk from "chalk";
@@ -80,6 +80,19 @@ function parseReportStandard(value: string): ReportStandard {
     return value;
   }
   throw new Error("standard must be one of: generic, soc2, iso27001");
+}
+
+function normalizeExportEvents(raw: unknown): AuditEvent[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((event): event is AuditEvent => {
+    if (!event || typeof event !== "object") return false;
+    const e = event as Record<string, unknown>;
+    return typeof e.sessionId === "string"
+      && typeof e.sequence === "number"
+      && typeof e.timestamp === "string"
+      && typeof e.eventType === "string"
+      && typeof e.action === "string";
+  });
 }
 
 export function registerAuditCommands(program: Command): void {
@@ -504,9 +517,118 @@ export function registerAuditCommands(program: Command): void {
     .command("verify")
     .description("Verify audit trail HMAC chain integrity")
     .option("-s, --session <id>", "Session ID or 'latest'", "latest")
-    .action((opts: { session: string }) => {
+    .option("--from-export <dir>", "Verify exported session directory instead of SQLite")
+    .option("--strict", "Re-verify exported chain from raw events")
+    .option("--signing-key <path>", "Signing key path for strict export verification")
+    .option("--json", "Output verification result as JSON")
+    .option("--exit-code", "Exit with status 1 when verification fails")
+    .action((opts: {
+      session: string;
+      fromExport?: string;
+      strict?: boolean;
+      signingKey?: string;
+      json?: boolean;
+      exitCode?: boolean;
+    }) => {
       const projectRoot = process.cwd();
       const khoregoDir = path.join(projectRoot, ".khoregos");
+
+      if (opts.fromExport) {
+        const exportDir = path.resolve(projectRoot, opts.fromExport);
+        const sessionFile = path.join(exportDir, "session.json");
+        const auditFile = path.join(exportDir, "audit-trail.json");
+        if (!existsSync(sessionFile) || !existsSync(auditFile)) {
+          console.error(chalk.red("Export directory is missing session.json or audit-trail.json."));
+          process.exit(1);
+        }
+
+        let sessionData: Record<string, unknown>;
+        let exportEvents: AuditEvent[];
+        try {
+          sessionData = JSON.parse(readFileSync(sessionFile, "utf-8")) as Record<string, unknown>;
+          exportEvents = normalizeExportEvents(
+            JSON.parse(readFileSync(auditFile, "utf-8")) as unknown,
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "failed to parse export files";
+          console.error(chalk.red(`Error: ${message}.`));
+          process.exit(1);
+        }
+
+        const sessionId = typeof sessionData.id === "string"
+          ? sessionData.id
+          : (typeof sessionData.session_id === "string" ? sessionData.session_id : "unknown");
+        const chainIntegrity = typeof sessionData.chain_integrity === "string"
+          ? sessionData.chain_integrity
+          : "CHAIN_UNVERIFIED";
+        const attestedValid = chainIntegrity === "CHAIN_INTACT";
+
+        let strictResult:
+          | { valid: boolean; eventsChecked: number; errors: number }
+          | null = null;
+        if (opts.strict) {
+          const signingKeyPath = opts.signingKey ?? process.env.K6S_SIGNING_KEY;
+          if (!signingKeyPath) {
+            console.error(
+              chalk.red(
+                "Strict verification requires --signing-key <path> or K6S_SIGNING_KEY.",
+              ),
+            );
+            process.exit(1);
+          }
+          const resolvedKeyPath = path.resolve(projectRoot, signingKeyPath);
+          if (!existsSync(resolvedKeyPath)) {
+            console.error(chalk.red(`Signing key not found: ${resolvedKeyPath}.`));
+            process.exit(1);
+          }
+          const keyHex = readFileSync(resolvedKeyPath, "utf-8").trim();
+          const signingKey = Buffer.from(keyHex, "hex");
+          const verification = verifyChain(signingKey, sessionId, exportEvents);
+          strictResult = {
+            valid: verification.valid,
+            eventsChecked: verification.eventsChecked,
+            errors: verification.errors.length,
+          };
+        }
+
+        const finalValid = strictResult ? strictResult.valid : attestedValid;
+        if (opts.json) {
+          console.log(
+            JSON.stringify(
+              {
+                source: "export",
+                session_id: sessionId,
+                chain_integrity: chainIntegrity,
+                attested_valid: attestedValid,
+                strict_checked: Boolean(strictResult),
+                strict_valid: strictResult?.valid ?? null,
+                events_checked: strictResult?.eventsChecked ?? exportEvents.length,
+                errors: strictResult?.errors ?? 0,
+                valid: finalValid,
+              },
+              null,
+              2,
+            ),
+          );
+        } else {
+          console.log(`${chalk.bold("Source:")} export`);
+          console.log(`${chalk.bold("Session:")} ${sessionId}`);
+          console.log(`${chalk.bold("Attested chain:")} ${chainIntegrity}`);
+          if (strictResult) {
+            console.log(`${chalk.bold("Strict re-verify:")} ${strictResult.valid ? "valid" : "invalid"}`);
+            console.log(`${chalk.bold("Events checked:")} ${strictResult.eventsChecked}`);
+            console.log(`${chalk.bold("Errors:")} ${strictResult.errors}`);
+          }
+          console.log(
+            `${chalk.bold("Result:")} ${finalValid ? chalk.green("valid") : chalk.red("invalid")}`,
+          );
+        }
+
+        if (opts.exitCode && !finalValid) {
+          process.exit(1);
+        }
+        return;
+      }
 
       if (!existsSync(path.join(khoregoDir, "k6s.db"))) {
         console.log(chalk.yellow("No audit data found."));
@@ -565,7 +687,21 @@ export function registerAuditCommands(program: Command): void {
       );
       console.log();
 
-      if (verification.valid) {
+      if (opts.json) {
+        console.log(
+          JSON.stringify(
+            {
+              source: "sqlite",
+              session_id: sessionId,
+              events_checked: verification.eventsChecked,
+              errors: verification.errors.length,
+              valid: verification.valid,
+            },
+            null,
+            2,
+          ),
+        );
+      } else if (verification.valid) {
         console.log(chalk.green("✓ Audit chain integrity verified."));
       } else {
         console.log(
@@ -581,6 +717,10 @@ export function registerAuditCommands(program: Command): void {
                 : chalk.yellow("UNSIGNED");
           console.log(`  ${prefix} seq ${err.sequence}: ${err.message}`);
         }
+      }
+
+      if (opts.exitCode && !verification.valid) {
+        process.exit(1);
       }
     });
 

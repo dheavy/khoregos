@@ -79,6 +79,19 @@ k6s audit report --session latest       # Generate compliance report
 k6s audit export --format json          # Export for downstream tooling
 ```
 
+**Commit the governance record alongside your code:**
+
+```bash
+k6s export --session latest --format git --output .governance/
+git add .governance/ && git commit -m "governance: add session audit trail"
+```
+
+This exports the full audit trail, session metadata, agent records, boundary violations, and a pre-rendered report into `.governance/` — structured files designed for git diffs and PR reviews. Verify the chain from exported data without the local database:
+
+```bash
+k6s audit verify --from-export .governance/sessions/01JAB.../  --exit-code
+```
+
 **Resume tomorrow where you left off:**
 
 ```bash
@@ -115,6 +128,7 @@ The `sensitive_needs_review` warning on seq 8 fired automatically because the ag
 - **Boundary enforcement.** Per-agent file access rules using glob patterns. Advisory mode logs violations; strict mode reverts them via git.
 - **Sensitive change detection.** Gate patterns flag modifications to dependency files, secrets, infrastructure configs, and security-sensitive paths.
 - **Supply chain visibility.** Automatic detection of dependency additions, removals, and version changes.
+- **Git export.** Export a session's governance data as structured, diffable files that travel with the code. Verify the HMAC chain from exported data in CI without the local database.
 - **Compliance reporting.** Structured Markdown reports with SOC 2 and ISO 27001 mapping templates.
 - **Data classification.** File-level tags (`public`, `internal`, `confidential`, `restricted`) carried through audit events.
 - **External timestamping.** RFC 3161 anchors for non-repudiation.
@@ -172,9 +186,8 @@ When the plugin is not installed, `k6s team start` falls back to direct filesyst
 
 ## Roadmap
 
-- **Phase 6.** Complete.
-- **Phase 7.** CI/CD integration and developer experience: JSON output, git export of governance state, configuration presets.
-- **Phase 8.** Distribution and ecosystem integration: npm global publishing, PR/MR templates, SAST webhook templates.
+- **Phase 7.** JSON output, git export, and developer experience: `--json` flag, `--exit-code` for scripting, git export with `--from-export` verification, configuration presets.
+- **Phase 8.** Distribution and ecosystem integration: npm global publishing, PR/MR templates consuming exported governance data, SAST webhook templates.
 
 ## Documentation
 
