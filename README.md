@@ -73,9 +73,12 @@ k6s team start --run "implement OAuth2 login with Google provider"
 ```bash
 k6s audit show                          # Full event timeline
 k6s audit show --severity critical      # Filter by severity
+k6s audit show --json                   # Machine-readable events for scripts
 k6s audit tail                          # Live-stream events
-k6s audit verify                        # Verify HMAC chain integrity
+k6s audit verify --json --exit-code     # Verify chain and gate CI on failure
 k6s audit report --session latest       # Generate compliance report
+k6s audit report --session latest --json # Structured report payload
+k6s compliance checkpoint --json --exit-code # Compliance gate for pipelines
 k6s audit export --format json          # Export for downstream tooling
 ```
 
@@ -90,6 +93,14 @@ This exports the full audit trail, session metadata, agent records, boundary vio
 
 ```bash
 k6s audit verify --from-export .governance/sessions/01JAB.../  --exit-code
+```
+
+For scripts, use JSON output on any structured command:
+
+```bash
+k6s --json status
+k6s --json team status
+k6s --json session list
 ```
 
 **Resume tomorrow where you left off:**
