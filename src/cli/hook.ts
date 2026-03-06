@@ -25,6 +25,7 @@ import {
   getTracer,
   recordActiveAgentDelta,
   recordToolDurationSeconds,
+  recordTokenUsage,
 } from "../engine/telemetry.js";
 import { detectDependencyChanges } from "../engine/dependencies.js";
 import { ClassificationResolver } from "../engine/classification.js";
@@ -32,6 +33,11 @@ import { ReviewPatternMatcher } from "../watcher/fs.js";
 import { Db } from "../store/db.js";
 import type { EventType } from "../models/audit.js";
 import { WebhookDispatcher } from "../engine/webhooks.js";
+import {
+  readTranscriptIncremental,
+  findUsageForToolUse,
+} from "../engine/transcript.js";
+import { estimateCost } from "../engine/cost.js";
 
 // Maximum bytes to read from stdin before aborting (1 MB).
 // Hook payloads are small JSON objects; anything larger is anomalous.
@@ -495,6 +501,39 @@ export function registerHookCommands(program: Command): void {
       );
       if (durationMs != null && durationMs >= 0) {
         recordToolDurationSeconds(durationMs / 1000);
+      }
+
+      // Token usage capture: read new transcript entries and extract usage data
+      // for this tool call. The transcript_path is provided by Claude Code in
+      // every hook payload.
+      const transcriptPath = data.transcript_path as string | undefined;
+      const toolUseId = data.tool_use_id as string | undefined;
+      if (transcriptPath && toolUseId) {
+        const offset = sm.getTranscriptOffset(sessionId);
+        const { entries, newOffset } = readTranscriptIncremental(
+          transcriptPath,
+          offset,
+        );
+        if (newOffset > offset) {
+          sm.setTranscriptOffset(sessionId, newOffset);
+        }
+        const usage = findUsageForToolUse(entries, toolUseId);
+        if (usage) {
+          const costUsd = estimateCost(usage);
+          sm.recordCost({
+            sessionId,
+            agentId,
+            usage,
+            estimatedCostUsd: costUsd,
+            auditEventId: event.id,
+          });
+          recordTokenUsage(
+            usage.inputTokens,
+            usage.outputTokens,
+            costUsd,
+            usage.model,
+          );
+        }
       }
 
       // Sensitive-file annotation: log a sensitive_needs_review audit event when

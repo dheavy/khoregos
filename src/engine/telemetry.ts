@@ -197,6 +197,9 @@ export async function shutdownTelemetry(): Promise<void> {
     activeAgentsUpDown = null;
     boundaryViolationsCounter = null;
     toolDurationHistogram = null;
+    inputTokensCounter = null;
+    outputTokensCounter = null;
+    tokenCostCounter = null;
     return;
   }
 
@@ -225,6 +228,9 @@ export async function shutdownTelemetry(): Promise<void> {
   activeAgentsUpDown = null;
   boundaryViolationsCounter = null;
   toolDurationHistogram = null;
+  inputTokensCounter = null;
+  outputTokensCounter = null;
+  tokenCostCounter = null;
 }
 
 /**
@@ -253,6 +259,12 @@ let activeAgentsUpDown: ReturnType<ReturnType<typeof getMeter>["createUpDownCoun
 let boundaryViolationsCounter: ReturnType<ReturnType<typeof getMeter>["createCounter"]> | null =
   null;
 let toolDurationHistogram: ReturnType<ReturnType<typeof getMeter>["createHistogram"]> | null =
+  null;
+let inputTokensCounter: ReturnType<ReturnType<typeof getMeter>["createCounter"]> | null =
+  null;
+let outputTokensCounter: ReturnType<ReturnType<typeof getMeter>["createCounter"]> | null =
+  null;
+let tokenCostCounter: ReturnType<ReturnType<typeof getMeter>["createCounter"]> | null =
   null;
 
 function getSessionsTotalCounter() {
@@ -332,6 +344,54 @@ export function recordBoundaryViolation(violationType: string, amount = 1): void
 /** Record a tool call duration in seconds (k6s_tool_duration_seconds histogram). */
 export function recordToolDurationSeconds(seconds: number): void {
   getToolDurationHistogram().record(seconds);
+}
+
+function getInputTokensCounter() {
+  if (!inputTokensCounter) {
+    inputTokensCounter = getMeter().createCounter("k6s_input_tokens_total", {
+      description: "Total input tokens consumed",
+      unit: "tokens",
+    });
+  }
+  return inputTokensCounter;
+}
+
+function getOutputTokensCounter() {
+  if (!outputTokensCounter) {
+    outputTokensCounter = getMeter().createCounter("k6s_output_tokens_total", {
+      description: "Total output tokens consumed",
+      unit: "tokens",
+    });
+  }
+  return outputTokensCounter;
+}
+
+function getTokenCostCounter() {
+  if (!tokenCostCounter) {
+    tokenCostCounter = getMeter().createCounter("k6s_token_cost_usd_total", {
+      description: "Total estimated token cost in USD",
+      unit: "USD",
+    });
+  }
+  return tokenCostCounter;
+}
+
+/** Record token usage from a single API response. */
+export function recordTokenUsage(
+  inputTokens: number,
+  outputTokens: number,
+  costUsd: number,
+  model: string,
+): void {
+  if (inputTokens > 0) {
+    getInputTokensCounter().add(inputTokens, { model });
+  }
+  if (outputTokens > 0) {
+    getOutputTokensCounter().add(outputTokens, { model });
+  }
+  if (costUsd > 0) {
+    getTokenCostCounter().add(costUsd, { model });
+  }
 }
 
 export { TOOL_DURATION_BUCKETS };

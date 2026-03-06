@@ -17,6 +17,7 @@ import {
   recordActiveAgentDelta,
   recordBoundaryViolation,
   recordToolDurationSeconds,
+  recordTokenUsage,
 } from '../engine/telemetry.js';
 import {
   generateDefaultConfig,
@@ -32,6 +33,7 @@ import { registerAuditCommands } from './audit.js';
 import { registerHookCommands } from './hook.js';
 import { registerComplianceCommands } from './compliance.js';
 import { registerExportCommand } from './export.js';
+import { registerCostCommands } from './cost.js';
 import { registerInitCommand } from './init.js';
 import { output, outputError, resolveJsonOption } from './output.js';
 import { VERSION } from '../version.js';
@@ -70,6 +72,7 @@ registerAuditCommands(program);
 registerHookCommands(program);
 registerComplianceCommands(program);
 registerExportCommand(program);
+registerCostCommands(program);
 registerInitCommand(program);
 
 // telemetry smoke
@@ -162,6 +165,20 @@ program
             if (typeof durationMs === 'number' && durationMs >= 0) {
               recordToolDurationSeconds(durationMs / 1000);
             }
+          }
+
+          // Emit token metrics from cost_records linked to this audit event.
+          const costRow = db.fetchOne(
+            'SELECT input_tokens, output_tokens, estimated_cost_usd, model FROM cost_records WHERE audit_event_id = ?',
+            [String(row.id)],
+          );
+          if (costRow) {
+            recordTokenUsage(
+              Number(costRow.input_tokens),
+              Number(costRow.output_tokens),
+              Number(costRow.estimated_cost_usd),
+              String(costRow.model ?? 'unknown'),
+            );
           }
 
           if (rowId > lastRowId) {

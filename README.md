@@ -82,6 +82,9 @@ k6s audit report --session latest       # Generate compliance report
 k6s audit report --session latest --json # Structured report payload
 k6s compliance checkpoint --json --exit-code # Compliance gate for pipelines
 k6s audit export --format json          # Export for downstream tooling
+k6s cost show                           # Token usage and cost summary
+k6s cost show --by-agent                # Cost breakdown per agent
+k6s cost show --by-model --json         # Per-model breakdown (JSON)
 ```
 
 **Commit the governance record alongside your code:**
@@ -150,7 +153,8 @@ The `sensitive_needs_review` warning on seq 8 fired automatically because the ag
 - **Claude Code plugin.** Native plugin with hooks, MCP server, governance skill, and slash commands. Two-command install via marketplace.
 - **Configuration presets.** Six named presets (`minimal`, `security-strict`, `compliance-soc2`, `compliance-iso27001`, `monorepo`, `microservices`) generate a tailored `k6s.yaml` in one command.
 - **Plugin system.** ESM plugins with lifecycle and event hooks for custom governance logic.
-- **Observability.** OpenTelemetry traces, Prometheus metrics endpoint, OTLP export.
+- **Token usage tracking.** Automatic capture of input/output/cache tokens and estimated costs from Claude Code transcript data. Per-session and per-agent cost breakdowns via `k6s cost show`.
+- **Observability.** OpenTelemetry traces, Prometheus metrics endpoint, OTLP export. Token usage counters (`k6s_input_tokens_total`, `k6s_output_tokens_total`, `k6s_token_cost_usd_total`).
 - **File locking.** SQLite-based exclusive locks to prevent multi-agent edit collisions.
 
 ## How it works (without patching Claude Code)
@@ -197,11 +201,6 @@ When the plugin is not installed, `k6s team start` falls back to direct filesyst
 ## Configuration
 
 `k6s.yaml` controls everything: project metadata, retention policies, per-agent boundary rules, data classifications, gate patterns, and observability settings. `k6s init` generates sensible defaults that flag `.env*`, `*.pem`, `*.key`, and dependency files out of the box. For faster setup, use `k6s init --preset <name>` to generate a config tuned for your use case — from solo experiments (`minimal`) to SOC 2 audit prep (`compliance-soc2`) to multi-package repos (`monorepo`).
-
-## Roadmap
-
-- **Phase 7.** JSON output, git export, and developer experience: `--json` flag, `--exit-code` for scripting, git export with `--from-export` verification, configuration presets. Complete.
-- **Phase 8.** Distribution and ecosystem integration: npm global publishing, PR/MR templates consuming exported governance data, SAST webhook templates.
 
 ## Documentation
 

@@ -47,7 +47,7 @@ describe("plugin package structure", () => {
 
     expect(Array.isArray(plugins)).toBe(true);
     expect(plugins[0]?.name).toBe("khoregos");
-    expect(plugins[0]?.source).toBe("./plugin");
+    expect(plugins[0]?.source).toBe("plugin");
     expect(plugins[0]?.version).toBe(pkg.version);
   });
 

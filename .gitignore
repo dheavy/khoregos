@@ -6,3 +6,4 @@ dist/
 .khoregos/
 .env
 .DS_Store
+.claude
