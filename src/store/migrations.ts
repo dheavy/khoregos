@@ -2,7 +2,7 @@
  * Database schema migrations for Khoregos.
  */
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 type Migration = [version: number, sql: string];
 
@@ -171,6 +171,19 @@ const MIGRATIONS: Migration[] = [
       verified INTEGER DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_timestamps_session ON timestamps(session_id, event_sequence);
+    `,
+  ],
+  [
+    6,
+    `
+    -- Extend cost_records with cache token breakdown and audit event correlation.
+    ALTER TABLE cost_records ADD COLUMN cache_creation_input_tokens INTEGER DEFAULT 0;
+    ALTER TABLE cost_records ADD COLUMN cache_read_input_tokens INTEGER DEFAULT 0;
+    ALTER TABLE cost_records ADD COLUMN audit_event_id TEXT REFERENCES audit_events(id);
+
+    -- Track the last-read byte offset in the transcript file so incremental
+    -- reads only process new lines on each hook invocation.
+    ALTER TABLE sessions ADD COLUMN transcript_offset INTEGER DEFAULT 0;
     `,
   ],
 ];

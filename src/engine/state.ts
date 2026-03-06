@@ -4,6 +4,7 @@
 
 import { randomUUID } from "node:crypto";
 import { ulid } from "ulid";
+import type { TranscriptUsage } from "./transcript.js";
 import type { Db } from "../store/db.js";
 import {
   type Session,
@@ -271,6 +272,62 @@ export class StateManager {
       sessionId,
       key,
     ]);
+  }
+
+  // Cost tracking
+
+  recordCost(opts: {
+    sessionId: string;
+    agentId: string;
+    usage: TranscriptUsage;
+    estimatedCostUsd: number;
+    auditEventId?: string | null;
+  }): void {
+    const id = ulid();
+    this.db.insert("cost_records", {
+      id,
+      session_id: opts.sessionId,
+      agent_id: opts.agentId,
+      task_id: null,
+      timestamp: new Date().toISOString(),
+      model: opts.usage.model,
+      input_tokens: opts.usage.inputTokens,
+      output_tokens: opts.usage.outputTokens,
+      estimated_cost_usd: opts.estimatedCostUsd,
+      cache_creation_input_tokens: opts.usage.cacheCreationInputTokens,
+      cache_read_input_tokens: opts.usage.cacheReadInputTokens,
+      audit_event_id: opts.auditEventId ?? null,
+    });
+
+    // Update session aggregates.
+    this.db.db
+      .prepare(
+        `UPDATE sessions
+         SET total_input_tokens = total_input_tokens + ?,
+             total_output_tokens = total_output_tokens + ?,
+             total_cost_usd = total_cost_usd + ?
+         WHERE id = ?`,
+      )
+      .run(
+        opts.usage.inputTokens,
+        opts.usage.outputTokens,
+        opts.estimatedCostUsd,
+        opts.sessionId,
+      );
+  }
+
+  getTranscriptOffset(sessionId: string): number {
+    const row = this.db.fetchOne(
+      "SELECT transcript_offset FROM sessions WHERE id = ?",
+      [sessionId],
+    );
+    return (row?.transcript_offset as number) ?? 0;
+  }
+
+  setTranscriptOffset(sessionId: string, offset: number): void {
+    this.db.db
+      .prepare("UPDATE sessions SET transcript_offset = ? WHERE id = ?")
+      .run(offset, sessionId);
   }
 
   // Session summary for resumption

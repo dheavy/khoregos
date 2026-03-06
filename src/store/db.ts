@@ -16,7 +16,7 @@ const TABLE_SCHEMA: Record<string, ReadonlySet<string>> = {
   sessions: new Set([
     "id", "objective", "state", "started_at", "ended_at",
     "parent_session_id", "config_snapshot", "context_summary",
-    "total_cost_usd", "total_input_tokens", "total_output_tokens",
+    "total_cost_usd", "total_input_tokens", "total_output_tokens", "transcript_offset",
     "metadata", "operator", "hostname", "k6s_version",
     "claude_code_version", "git_branch", "git_sha", "git_dirty",
     "trace_id",
@@ -39,6 +39,7 @@ const TABLE_SCHEMA: Record<string, ReadonlySet<string>> = {
   cost_records: new Set([
     "id", "session_id", "agent_id", "task_id", "timestamp",
     "model", "input_tokens", "output_tokens", "estimated_cost_usd",
+    "cache_creation_input_tokens", "cache_read_input_tokens", "audit_event_id",
   ]),
   context_store: new Set([
     "key", "session_id", "agent_id", "value", "updated_at",
