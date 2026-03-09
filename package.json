@@ -1,6 +1,6 @@
 {
-  "name": "khoregos",
-  "version": "1.5.0",
+  "name": "@sibyllai/khoregos",
+  "version": "1.5.1",
   "description": "Enterprise governance layer for Claude Code Agent Teams",
   "type": "module",
   "bin": {
