@@ -96,7 +96,8 @@ k6s dashboard                              # Standalone
 k6s team start "implement auth" --dashboard # Or with team start
 ```
 
-![Khoregos Dashboard](docs/k6s-dashboard.jpg)
+![k6s-dashboard](https://github.com/user-attachments/assets/616aa68b-2366-4193-8182-ebb8999b352a)
+
 
 The dashboard serves a self-contained HTML page on localhost with SSE-powered live updates — audit trail, cost tracking, agent status, sensitive review items, and conversation transcript in one view.
 
