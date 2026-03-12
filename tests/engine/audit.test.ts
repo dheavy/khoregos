@@ -21,6 +21,8 @@ import { spawn } from "node:child_process";
 import { sessionToDbRow } from "../../src/models/session.js";
 import type { Session } from "../../src/models/session.js";
 import { WebhookDispatcher } from "../../src/engine/webhooks.js";
+import { verifyChain } from "../../src/engine/signing.js";
+import { auditEventFromDbRow } from "../../src/models/audit.js";
 import { vi } from "vitest";
 
 describe("AuditLogger", () => {
@@ -346,6 +348,135 @@ describe("AuditLogger", () => {
       const events = logger.getEvents({ eventType: "session_start", limit: 5 });
       events.forEach((e) => expect(e.eventType).toBe("session_start"));
     });
+  });
+});
+
+describe("sequence atomicity", () => {
+  let db: Db;
+  let signingKeyDir: string;
+  let signingKey: Buffer | null = null;
+
+  beforeAll(() => {
+    const dbPath = getTempDbPath();
+    db = new Db(dbPath);
+    db.connect();
+    signingKeyDir = mkdtempSync(path.join(tmpdir(), "k6s-seq-"));
+    generateSigningKey(signingKeyDir);
+    signingKey = loadSigningKey(signingKeyDir);
+  });
+
+  afterAll(() => {
+    db.close();
+    cleanupTempDir();
+    rmSync(signingKeyDir, { recursive: true });
+  });
+
+  function createSession(sid: string): void {
+    db.insert("sessions", sessionToDbRow({
+      id: sid,
+      objective: "seq test",
+      state: "active",
+      startedAt: new Date().toISOString(),
+      endedAt: null,
+      parentSessionId: null,
+      configSnapshot: null,
+      contextSummary: null,
+      metadata: null,
+      operator: null,
+      hostname: null,
+      k6sVersion: null,
+      claudeCodeVersion: null,
+      gitBranch: null,
+      gitSha: null,
+      gitDirty: false,
+      traceId: null,
+    }));
+  }
+
+  it("separate AuditLogger instances produce unique sequence numbers", () => {
+    const sid = "01SEQ_UNIQUE_TEST_00000000A";
+    createSession(sid);
+
+    // Simulate two hook processes each creating their own logger
+    const logger1 = new AuditLogger(db, sid, null, signingKey!);
+    logger1.start();
+    const logger2 = new AuditLogger(db, sid, null, signingKey!);
+    logger2.start();
+
+    const e1 = logger1.log({ eventType: "tool_use", action: "action-1" });
+    const e2 = logger2.log({ eventType: "tool_use", action: "action-2" });
+    const e3 = logger1.log({ eventType: "tool_use", action: "action-3" });
+
+    expect(e1.sequence).toBe(1);
+    expect(e2.sequence).toBe(2);
+    expect(e3.sequence).toBe(3);
+  });
+
+  it("HMAC chain remains valid across interleaved loggers", () => {
+    const sid = "01SEQ_HMAC_CHAIN_0000000B";
+    createSession(sid);
+
+    const logger1 = new AuditLogger(db, sid, null, signingKey!);
+    logger1.start();
+    const logger2 = new AuditLogger(db, sid, null, signingKey!);
+    logger2.start();
+
+    logger1.log({ eventType: "session_start", action: "start" });
+    logger2.log({ eventType: "tool_use", action: "tool-a" });
+    logger1.log({ eventType: "tool_use", action: "tool-b" });
+
+    // Fetch all events and verify chain
+    const events = db.fetchAll(
+      "SELECT * FROM audit_events WHERE session_id = ? ORDER BY sequence ASC",
+      [sid],
+    );
+    expect(events).toHaveLength(3);
+    for (const e of events) {
+      expect(e.hmac).not.toBeNull();
+    }
+
+    // Verify the HMAC chain using the signing module
+    const mapped = events.map(auditEventFromDbRow);
+    const result = verifyChain(signingKey!, sid, mapped);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it("UNIQUE constraint rejects duplicate sequence numbers", () => {
+    const sid = "01SEQ_DUP_REJECT_0000000C";
+    createSession(sid);
+
+    db.insert("audit_events", {
+      id: "dup-test-1",
+      sequence: 1,
+      session_id: sid,
+      agent_id: null,
+      timestamp: new Date().toISOString(),
+      event_type: "tool_use",
+      action: "first",
+      details: null,
+      files_affected: null,
+      gate_id: null,
+      hmac: null,
+      severity: "info",
+    });
+
+    expect(() => {
+      db.insert("audit_events", {
+        id: "dup-test-2",
+        sequence: 1,
+        session_id: sid,
+        agent_id: null,
+        timestamp: new Date().toISOString(),
+        event_type: "tool_use",
+        action: "duplicate",
+        details: null,
+        files_affected: null,
+        gate_id: null,
+        hmac: null,
+        severity: "info",
+      });
+    }).toThrow();
   });
 });
 
