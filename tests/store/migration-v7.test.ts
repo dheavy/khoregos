@@ -61,7 +61,7 @@ describe("migration v7", () => {
     expect(indexes).toHaveLength(1);
   });
 
-  it("schema version is 7", () => {
-    expect(db.schemaVersion).toBe(7);
+  it("schema version is 8", () => {
+    expect(db.schemaVersion).toBe(8);
   });
 });

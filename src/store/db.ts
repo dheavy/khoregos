@@ -161,6 +161,24 @@ export class Db {
     return this.db.transaction(fn)();
   }
 
+  /**
+   * Run a function inside a BEGIN IMMEDIATE transaction.
+   * This acquires a write lock before running the callback,
+   * preventing concurrent processes from reading stale data.
+   */
+  transactionImmediate<T>(fn: () => T): T {
+    const stmt = "BEGIN IMMEDIATE";
+    this.db.prepare(stmt).run();
+    try {
+      const result = fn();
+      this.db.prepare("COMMIT").run();
+      return result;
+    } catch (err) {
+      this.db.prepare("ROLLBACK").run();
+      throw err;
+    }
+  }
+
   fetchOne(sql: string, params: unknown[] = []): Row | undefined {
     return this.db.prepare(sql).get(...params) as Row | undefined;
   }

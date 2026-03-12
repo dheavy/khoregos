@@ -2,7 +2,7 @@
  * Database schema migrations for Khoregos.
  */
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 type Migration = [version: number, sql: string];
 
@@ -208,6 +208,15 @@ const MIGRATIONS: Migration[] = [
     );
     CREATE INDEX IF NOT EXISTS idx_transcript_session ON transcript_entries(session_id, sequence);
     CREATE INDEX IF NOT EXISTS idx_transcript_type ON transcript_entries(session_id, entry_type);
+    `,
+  ],
+  [
+    8,
+    `
+    -- Enforce unique sequence numbers per session to prevent race conditions
+    -- when concurrent hook processes assign sequence numbers simultaneously.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_session_seq_unique
+      ON audit_events(session_id, sequence);
     `,
   ],
 ];

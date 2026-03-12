@@ -49,20 +49,8 @@ export class AuditLogger {
   ) {}
 
   start(): void {
-    const row = this.db.fetchOne(
-      "SELECT MAX(sequence) as max_seq FROM audit_events WHERE session_id = ?",
-      [this.sessionId],
-    );
-    this.sequence = (row?.max_seq as number) ?? 0;
-
-    // Load the last HMAC in the chain for continuity.
-    if (this.signingKey && this.sequence > 0) {
-      const lastRow = this.db.fetchOne(
-        "SELECT hmac FROM audit_events WHERE session_id = ? AND sequence = ?",
-        [this.sessionId, this.sequence],
-      );
-      this.lastHmac = (lastRow?.hmac as string) ?? null;
-    }
+    // Sequence and HMAC chain state are now loaded atomically inside log()
+    // via an IMMEDIATE transaction, so no pre-loading is needed here.
 
     const sessionRow = this.db.fetchOne(
       "SELECT config_snapshot FROM sessions WHERE id = ?",
@@ -121,38 +109,55 @@ export class AuditLogger {
     gateId?: string | null;
     severity?: AuditSeverity;
   }): AuditEvent {
-    this.sequence += 1;
+    // Atomically assign the next sequence number and insert the event.
+    // Each hook invocation is a separate process, so in-memory counters
+    // race under concurrent agent activity. An IMMEDIATE transaction
+    // acquires a write lock before reading MAX(sequence), preventing
+    // two processes from obtaining the same value.
+    const event = this.db.transactionImmediate(() => {
+      const row = this.db.fetchOne(
+        "SELECT sequence, hmac FROM audit_events WHERE session_id = ? ORDER BY sequence DESC LIMIT 1",
+        [this.sessionId],
+      );
+      const currentMax = (row?.sequence as number) ?? 0;
+      const currentHmac = (row?.hmac as string) ?? null;
+      this.sequence = currentMax + 1;
+      if (currentHmac !== null) {
+        this.lastHmac = currentHmac;
+      }
 
-    const event: AuditEvent = {
-      id: ulid(),
-      timestamp: new Date().toISOString(),
-      sequence: this.sequence,
-      sessionId: this.sessionId,
-      agentId: opts.agentId ?? null,
-      eventType: opts.eventType,
-      action: opts.action,
-      details: opts.details || this.traceId
-        ? JSON.stringify({
-            ...(opts.details ?? {}),
-            ...(this.traceId ? { trace_id: this.traceId } : {}),
-          })
-        : null,
-      filesAffected: opts.filesAffected?.length
-        ? JSON.stringify(opts.filesAffected)
-        : null,
-      gateId: opts.gateId ?? null,
-      hmac: null,
-      severity: opts.severity ?? "info",
-    };
+      const ev: AuditEvent = {
+        id: ulid(),
+        timestamp: new Date().toISOString(),
+        sequence: this.sequence,
+        sessionId: this.sessionId,
+        agentId: opts.agentId ?? null,
+        eventType: opts.eventType,
+        action: opts.action,
+        details: opts.details || this.traceId
+          ? JSON.stringify({
+              ...(opts.details ?? {}),
+              ...(this.traceId ? { trace_id: this.traceId } : {}),
+            })
+          : null,
+        filesAffected: opts.filesAffected?.length
+          ? JSON.stringify(opts.filesAffected)
+          : null,
+        gateId: opts.gateId ?? null,
+        hmac: null,
+        severity: opts.severity ?? "info",
+      };
 
-    // Compute HMAC chain if a signing key is available.
-    if (this.signingKey) {
-      const previousHmac = this.lastHmac ?? genesisValue(this.sessionId);
-      event.hmac = computeHmac(this.signingKey, previousHmac, event);
-      this.lastHmac = event.hmac;
-    }
+      // Compute HMAC chain if a signing key is available.
+      if (this.signingKey) {
+        const previousHmac = this.lastHmac ?? genesisValue(this.sessionId);
+        ev.hmac = computeHmac(this.signingKey, previousHmac, ev);
+        this.lastHmac = ev.hmac;
+      }
 
-    this.db.insert("audit_events", auditEventToDbRow(event));
+      this.db.insert("audit_events", auditEventToDbRow(ev));
+      return ev;
+    });
 
     if (
       this.autoTimestamping
