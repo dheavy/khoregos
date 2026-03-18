@@ -131,6 +131,13 @@ export const TranscriptConfigSchema = z.object({
 });
 export type TranscriptConfig = z.infer<typeof TranscriptConfigSchema>;
 
+export const NotificationsConfigSchema = z.object({
+  session_lifecycle: z.boolean().default(true),
+  desktop: z.boolean().default(true),
+  dashboard: z.boolean().default(true),
+});
+export type NotificationsConfig = z.infer<typeof NotificationsConfigSchema>;
+
 export const DashboardConfigSchema = z.object({
   port: z.number().default(6100),
   host: z.string().default("localhost"),
@@ -153,6 +160,7 @@ export const K6sConfigSchema = z.object({
   gates: z.array(GateConfigSchema).default([]),
   observability: ObservabilityConfigSchema.default({}),
   transcript: TranscriptConfigSchema.default({}),
+  notifications: NotificationsConfigSchema.default({}),
   dashboard: DashboardConfigSchema.default({}),
   plugins: z.array(PluginConfigSchema).default([]),
 });

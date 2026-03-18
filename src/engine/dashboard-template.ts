@@ -586,8 +586,14 @@ export function getDashboardHTML(sessionId: string, config: K6sConfig): string {
       if (autoScrollEnabled) auditPanel.scrollTop = auditPanel.scrollHeight;
     }
 
-    if (ev.severity === 'critical' && 'Notification' in window && Notification.permission === 'granted') {
-      new Notification('Khoregos Alert', { body: ev.action || 'Critical event', tag: ev.id });
+    if ('Notification' in window && Notification.permission === 'granted') {
+      if (ev.severity === 'critical') {
+        new Notification('Khoregos Alert', { body: ev.action || 'Critical event', tag: ev.id });
+      }
+      if (ev.event_type === 'session_start' || ev.event_type === 'session_complete') {
+        const title = ev.event_type === 'session_start' ? 'Session Started' : 'Session Ended';
+        new Notification('Khoregos — ' + title, { body: ev.action || title, tag: ev.id || title });
+      }
     }
     renderSparkline();
   }

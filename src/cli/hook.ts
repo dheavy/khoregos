@@ -48,6 +48,7 @@ import {
   recordLangfuseEvent,
 } from "../engine/langfuse.js";
 import { pushToDashboard } from "../engine/dashboard.js";
+import { notifySessionLifecycle } from "../engine/notifications.js";
 import { readDashboardPid } from "./team.js";
 
 // Maximum bytes to read from stdin before aborting (1 MB).
@@ -868,6 +869,10 @@ export function registerHookCommands(program: Command): void {
       event_type: "session_complete",
       action: "claude code session ended",
       timestamp: new Date().toISOString(),
+    });
+
+    notifySessionLifecycle("session_complete", config.notifications, {
+      sessionId,
     });
 
     // Mark session as completed.
