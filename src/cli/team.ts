@@ -52,6 +52,7 @@ import {
   updateSessionTrace,
   scoreSession,
 } from "../engine/langfuse.js";
+import { notifySessionLifecycle } from "../engine/notifications.js";
 import { output, resolveJsonOption } from "./output.js";
 
 // ── Dashboard daemon helpers ────────────────────────────────────────
@@ -473,6 +474,11 @@ export function registerTeamCommands(program: Command): void {
 
       console.log(chalk.green("✓") + ` Session ${chalk.bold(session.id.slice(0, 8) + "...")} created`);
 
+      notifySessionLifecycle("session_start", config.notifications, {
+        sessionId: session.id,
+        objective,
+      });
+
       injectClaudeMdGovernance(projectRoot, {
         sessionId: session.id,
         objective,
@@ -630,6 +636,16 @@ export function registerTeamCommands(program: Command): void {
       setWebhookDispatcher(null);
       await shutdownLangfuse();
       await shutdownTelemetry();
+
+      // Load notifications config for desktop notification.
+      const stopConfig = existsSync(configFile)
+        ? loadConfig(configFile)
+        : null;
+      notifySessionLifecycle(
+        "session_complete",
+        stopConfig?.notifications ?? { session_lifecycle: true, desktop: true, dashboard: true },
+        { sessionId },
+      );
 
       console.log(chalk.green("✓") + ` Session ${sessionId.slice(0, 8)}... stopped`);
       console.log(chalk.green("✓") + " Governance removed (CLAUDE.md, hooks)");
@@ -793,6 +809,11 @@ export function registerTeamCommands(program: Command): void {
 
       console.log(chalk.green("✓") + ` Resuming from session ${chalk.bold(result.prev.id.slice(0, 8) + "...")}`);
       console.log(`${chalk.bold("Objective:")} ${result.prev.objective}`);
+
+      notifySessionLifecycle("session_start", config.notifications, {
+        sessionId: result.newSession.id,
+        objective: result.newSession.objective,
+      });
 
       const pluginManaged = isPluginInstalled(projectRoot);
       injectClaudeMdGovernance(projectRoot, {
